@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+libxdrfile/build/
+libxdrfile/install/
+CMakeFiles/
+CMakeCache.txt
+
+# Local runtime outputs
+run_*.csv
+run_*.json
+run_*.png
+
+# Editor/OS files
+.DS_Store
+*.swp
