@@ -17,6 +17,7 @@ struct ProgramOptions {
   std::string benchCsvPath;
   std::string comparePlumedPath;
   std::string formatOverride{"auto"};
+  std::string algorithmOverride{"bls"};  // Clustering algorithm selection
   std::size_t stride{1};
   bool strideSet{false};
   std::size_t startFrame{0};
@@ -24,6 +25,12 @@ struct ProgramOptions {
   int threads{1};
   bool wantBench{false};
   bool quiet{false};
+  // Algorithm-specific parameters
+  int algoSkip{3};           // Skip distance for skip_dfs
+  double algoEps{3.0};       // Epsilon for DBSCAN
+  int algoMinPts{10};        // MinPts for DBSCAN
+  int algoK{20};             // K for k-means/spectral
+  double algoThreshold{4.0}; // Threshold for hierarchical
 };
 
 enum class GroupSelectorType { All, IndexRange, Name };

@@ -15,6 +15,8 @@ set(core_sources
     src/io/TngReader.cpp
     src/io/GroReader.cpp
     src/io/PdbReader.cpp
+    src/io/XyzReader.cpp
+    src/io/MolReader.cpp
     src/io/Topology.cpp
     src/lattice/Basis.cpp
     src/lattice/Enumerator.cpp
@@ -22,6 +24,7 @@ set(core_sources
     src/refine/SkipDFS.cpp
     src/bls/BLS.cpp
     src/bls/Comparison.cpp
+    src/cluster/Algorithms.cpp
     src/util/RSS.cpp)
 
 add_library(bls_core STATIC ${core_sources})

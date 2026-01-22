@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "lattice/Enumerator.hpp"
 #include "refine/SkipDFS.hpp"
 #include "util/Logging.hpp"
+#include "util/RSS.hpp"
 #include "util/Timer.hpp"
 
 namespace bls {
@@ -112,13 +114,15 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
   const double len0 = norm(col0);
   const double len1 = norm(col1);
   const double len2 = norm(col2);
-  if ((len0 < 1e-8 || len1 < 1e-8 || len2 < 1e-8) && !frame.xyz.empty()) {
-    Vec3 minPos{std::numeric_limits<double>::infinity(),
-                std::numeric_limits<double>::infinity(),
-                std::numeric_limits<double>::infinity()};
-    Vec3 maxPos{-std::numeric_limits<double>::infinity(),
-                -std::numeric_limits<double>::infinity(),
-                -std::numeric_limits<double>::infinity()};
+
+  // Helper lambda to compute coordinate bounds
+  auto computeBounds = [&](Vec3& minPos, Vec3& maxPos) {
+    minPos = Vec3{std::numeric_limits<double>::infinity(),
+                  std::numeric_limits<double>::infinity(),
+                  std::numeric_limits<double>::infinity()};
+    maxPos = Vec3{-std::numeric_limits<double>::infinity(),
+                  -std::numeric_limits<double>::infinity(),
+                  -std::numeric_limits<double>::infinity()};
     auto accumulate = [&](const Vec3& p) {
       minPos.x = std::min(minPos.x, p.x);
       minPos.y = std::min(minPos.y, p.y);
@@ -134,7 +138,39 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
     } else {
       for (const auto& p : frame.xyz) accumulate(p);
     }
-    const double padding = config_.gridSpacing;
+  };
+
+  // Check if box needs correction (zero/invalid or unreasonably large)
+  bool needsBoxCorrection = (len0 < 1e-8 || len1 < 1e-8 || len2 < 1e-8);
+
+  if (!needsBoxCorrection && !frame.xyz.empty() && config_.boxMode == BoxMode::Auto) {
+    // Box appears valid, but check if it's unreasonably large compared to coordinates
+    Vec3 minPos, maxPos;
+    computeBounds(minPos, maxPos);
+
+    double coordExtentX = maxPos.x - minPos.x;
+    double coordExtentY = maxPos.y - minPos.y;
+    double coordExtentZ = maxPos.z - minPos.z;
+
+    // If box is more than 10x larger than coordinate extent in any dimension, it's likely incorrect
+    const double suspiciousRatio = 10.0;
+    bool boxTooLarge = (len0 > coordExtentX * suspiciousRatio) ||
+                       (len1 > coordExtentY * suspiciousRatio) ||
+                       (len2 > coordExtentZ * suspiciousRatio);
+
+    if (boxTooLarge) {
+      Logger::warn("Box size (", len0, " x ", len1, " x ", len2,
+                   ") is unreasonably large compared to coordinate extent (",
+                   coordExtentX, " x ", coordExtentY, " x ", coordExtentZ,
+                   "). Auto-correcting to fit coordinates.");
+      needsBoxCorrection = true;
+    }
+  }
+
+  if (needsBoxCorrection && !frame.xyz.empty()) {
+    Vec3 minPos, maxPos;
+    computeBounds(minPos, maxPos);
+    const double padding = config_.gridSpacing * 2.0;
     origin = minPos;
     activeBox = Mat3{Vec3{std::max(maxPos.x - minPos.x + padding, padding), 0.0, 0.0},
                      Vec3{0.0, std::max(maxPos.y - minPos.y + padding, padding), 0.0},
@@ -143,9 +179,38 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
     col1 = activeBox.column(1);
     col2 = activeBox.column(2);
   }
+
   int nx = std::max(1, static_cast<int>(std::ceil(norm(col0) / config_.gridSpacing)));
   int ny = std::max(1, static_cast<int>(std::ceil(norm(col1) / config_.gridSpacing)));
   int nz = std::max(1, static_cast<int>(std::ceil(norm(col2) / config_.gridSpacing)));
+
+  // Check memory requirements before allocation
+  std::size_t requiredMemory = estimateGridMemoryBytes(nx, ny, nz);
+  std::size_t availableMemory = availableSystemRAMBytes();
+
+  // Use 80% of available RAM as the safety limit
+  std::size_t maxAllowedMemory = static_cast<std::size_t>(availableMemory * 0.8);
+
+  if (requiredMemory > maxAllowedMemory) {
+    std::ostringstream oss;
+    oss << "Grid allocation would require " << (requiredMemory / (1024.0 * 1024.0 * 1024.0))
+        << " GB, which exceeds available RAM limit ("
+        << (maxAllowedMemory / (1024.0 * 1024.0 * 1024.0)) << " GB).\n";
+    oss << "Grid dimensions: " << nx << " x " << ny << " x " << nz << " = "
+        << (static_cast<std::size_t>(nx) * ny * nz) << " voxels\n";
+    oss << "Box size: " << norm(col0) << " x " << norm(col1) << " x " << norm(col2) << " Angstroms\n";
+    oss << "Grid spacing: " << config_.gridSpacing << " Angstroms\n\n";
+    oss << "Solutions:\n";
+    oss << "  1. Increase GRID_SPACING (current: " << config_.gridSpacing << " A)\n";
+    double minSpacing = std::max({norm(col0), norm(col1), norm(col2)}) /
+                        maxBoxDimensionForRAM(1.0, maxAllowedMemory);
+    oss << "     Minimum spacing for this box: " << minSpacing << " A\n";
+    oss << "  2. Reduce box size (check CRYST1 record in PDB or use BOX MANUAL in config)\n";
+    double maxBoxSize = maxBoxDimensionForRAM(config_.gridSpacing, maxAllowedMemory);
+    oss << "     Maximum box dimension for current spacing: " << maxBoxSize << " A";
+    err = oss.str();
+    return false;
+  }
 
   if (!impl_->configured || nx != impl_->grid.nx() || ny != impl_->grid.ny() ||
       nz != impl_->grid.nz()) {

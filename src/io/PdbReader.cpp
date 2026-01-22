@@ -26,9 +26,14 @@ class PdbReader final : public TrajectoryReader {
   }
 
   bool read(Frame& frame, std::string& err) override {
-    if (!file_) {
+    if (!file_.is_open()) {
       err = "PDB reader not opened.";
       return false;
+    }
+
+    // Check for EOF from previous read
+    if (file_.eof()) {
+      return false;  // Normal EOF, no error
     }
 
     std::string line;

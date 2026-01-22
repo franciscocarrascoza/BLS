@@ -31,6 +31,8 @@ TrajectoryReaderPtr makeTrrReader();
 TrajectoryReaderPtr makeTngReader();
 TrajectoryReaderPtr makeGroReader();
 TrajectoryReaderPtr makePdbReader();
+TrajectoryReaderPtr makeXyzReader();
+TrajectoryReaderPtr makeMolReader();
 
 TrajectoryReaderPtr makeTrajectoryReader(const std::string& path, const std::string& format,
                                          std::string& err) {
@@ -53,6 +55,10 @@ TrajectoryReaderPtr makeTrajectoryReader(const std::string& path, const std::str
     reader = makeGroReader();
   } else if (chosen == "pdb") {
     reader = makePdbReader();
+  } else if (chosen == "xyz") {
+    reader = makeXyzReader();
+  } else if (chosen == "mol" || chosen == "sdf") {
+    reader = makeMolReader();
   } else {
     err = "Unsupported trajectory format: " + chosen;
     return nullptr;

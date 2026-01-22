@@ -1,2 +1,0 @@
-frame,time_ps,natoms,NX,NY,NZ,dNN_vox,lattice,centering,seeds,seed_hits,nclusters,max_cluster,refined_voxels,elapsed_ms
-0,0,20000,67,67,67,7,cubic,F,1372,18,18,2884,21797,225.811
