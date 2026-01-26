@@ -1,0 +1,13 @@
+BLS ...
+  GROUP ATOMS=all
+  BOX AUTO                     # 1000 Å per side
+  GRID_SPACING 1.8             # Matches H-bond (1.80 Å), minimal voxel count
+  CONNECTIVITY 6
+  SKIP 1                       # GRID_SPACING already covers H-bonds
+  ALPHA 3.6                    # dₙₙ = 3.6×2.8 = 10.1 Å
+  DNN 0
+  RADII 1.4,2.0
+  CUTOFF 0.75                  # Balance noise vs coverage
+  OCCUPANCY ANY
+  OUTPUT NCLUSTERS,MAX_CLUSTER,SEED_HITS,SEEDS,REFINED_VOXELS
+... BLS

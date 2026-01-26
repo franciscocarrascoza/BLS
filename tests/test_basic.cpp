@@ -5,6 +5,7 @@
 
 #include "bls/BLS.hpp"
 #include "bls/Options.hpp"
+#include "cluster/Algorithms.hpp"
 #include "grid/Grid.hpp"
 #include "lattice/Basis.hpp"
 #include "refine/SkipDFS.hpp"
@@ -139,6 +140,61 @@ int main() {
     check(analyzer.processFrame(frame, m2, err), "Second deterministic run failed: " + err);
     check(m1.nclusters == m2.nclusters && m1.maxCluster == m2.maxCluster,
           "Determinism violated: metrics differ");
+  }
+
+  // CC3D connectivity test.
+  {
+    std::vector<uint8_t> occupancy(8, 0);
+    std::vector<uint8_t> visited(8, 0);
+    // Create two voxels at opposite corners
+    occupancy[gridIndex(0, 0, 0, 2, 2)] = 1;
+    occupancy[gridIndex(1, 1, 1, 2, 2)] = 1;
+
+    // Test 6-connectivity (face neighbors only)
+    bls::ClusterResult result6 = bls::cc3d(2, 2, 2, 6, occupancy, visited);
+    check(result6.nclusters == 2, "CC3D with 6-connectivity should find 2 separate clusters");
+
+    // Reset visited
+    visited.assign(8, 0);
+
+    // Test 26-connectivity (includes diagonal)
+    bls::ClusterResult result26 = bls::cc3d(2, 2, 2, 26, occupancy, visited);
+    check(result26.nclusters == 1, "CC3D with 26-connectivity should find 1 cluster");
+  }
+
+  // HDBSCAN basic functionality test.
+  {
+    std::vector<uint8_t> occupancy(27, 0);
+    std::vector<uint8_t> visited(27, 0);
+    // Create a small cluster in the center
+    occupancy[gridIndex(1, 1, 1, 3, 3)] = 1;
+    occupancy[gridIndex(1, 1, 0, 3, 3)] = 1;
+    occupancy[gridIndex(1, 1, 2, 3, 3)] = 1;
+    occupancy[gridIndex(1, 0, 1, 3, 3)] = 1;
+    occupancy[gridIndex(1, 2, 1, 3, 3)] = 1;
+
+    bls::ClusterResult result = bls::hdbscan(3, 3, 3, 2, 2, occupancy, visited);
+    check(result.nclusters >= 1, "HDBSCAN should find at least 1 cluster");
+    check(result.visitedVoxels > 0, "HDBSCAN should visit some voxels");
+  }
+
+  // Algorithm comparison test (GCBD vs CC3D should match with same connectivity).
+  {
+    std::vector<uint8_t> occupancy(8, 0);
+    std::vector<uint8_t> visited1(8, 0);
+    std::vector<uint8_t> visited2(8, 0);
+    // Create a connected pattern
+    occupancy[gridIndex(0, 0, 0, 2, 2)] = 1;
+    occupancy[gridIndex(0, 0, 1, 2, 2)] = 1;
+    occupancy[gridIndex(0, 1, 0, 2, 2)] = 1;
+
+    bls::ClusterResult gcbd = bls::gcbd(2, 2, 2, occupancy, visited1);
+    bls::ClusterResult cc3d = bls::cc3d(2, 2, 2, 6, occupancy, visited2);
+
+    check(gcbd.nclusters == cc3d.nclusters,
+          "GCBD and CC3D with 6-connectivity should produce same cluster count");
+    check(gcbd.maxCluster == cc3d.maxCluster,
+          "GCBD and CC3D should produce same max cluster size");
   }
 
   if (failures == 0) {

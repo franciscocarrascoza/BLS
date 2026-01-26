@@ -1,0 +1,13 @@
+BLS ...
+  GROUP ATOMS=all              # Process all atoms in the system
+  BOX AUTO                     # Auto-detect simulation box (1000 Å³)
+  GRID_SPACING 0.9             # Voxel size 0.4 Å (captures O-H and H-bonds)
+  CONNECTIVITY 6               # 6-connected neighbors (±x,±y,±z)
+  SKIP 2                       # Ray step=2 (bridges 0.8 Å gaps, covers H-bonds)
+  ALPHA 1.0                   # Safety factor: dₙₙ = 0.75×(1.4+1.4) = 2.1 Å
+  DNN 0                        # Nearest Neighbor Distance: Auto-compute from RADII and ALPHA
+  RADII 1.4,2.0                # O van der Waals 1.4 Å, H 2.0 Å (conservative)
+  CUTOFF 0.8                   # Occupancy threshold within voxel (how much area of the VDW atom covers a voxel)
+  OCCUPANCY ANY                # Voxel occupied if atom present: ANY=OR logic; ALL=AND logic; AVERAGE=occupancy must meet CUTOFF
+  OUTPUT NCLUSTERS,MAX_CLUSTER,SEED_HITS,SEEDS,REFINED_VOXELS
+... BLS

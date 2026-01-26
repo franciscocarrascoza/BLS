@@ -60,7 +60,7 @@ TrajectoryReaderPtr makeTrajectoryReader(const std::string& path, const std::str
   } else if (chosen == "mol" || chosen == "sdf") {
     reader = makeMolReader();
   } else {
-    err = "Unsupported trajectory format: " + chosen;
+    err = "Unsupported molecular system format: " + chosen;
     return nullptr;
   }
 

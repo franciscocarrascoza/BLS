@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "cluster/UnionFindBasic.hpp"
 #include "util/Timer.hpp"
 
 namespace bls {
@@ -54,6 +55,9 @@ ClusterAlgorithm parseAlgorithm(const std::string& name) {
   if (lower == "kmeans" || lower == "k-means" || lower == "k_means") return ClusterAlgorithm::KMeans;
   if (lower == "spectral") return ClusterAlgorithm::Spectral;
   if (lower == "gcbd" || lower == "union_find" || lower == "uf") return ClusterAlgorithm::GCBD;
+  if (lower == "hdbscan") return ClusterAlgorithm::HDBSCAN;
+  if (lower == "cc3d" || lower == "cc3d_basic") return ClusterAlgorithm::CC3D;
+  if (lower == "cc3d_optimized" || lower == "cc3d_opt") return ClusterAlgorithm::CC3DOptimized;
 
   throw std::runtime_error("Unknown clustering algorithm: " + name);
 }
@@ -68,13 +72,16 @@ std::string algorithmToString(ClusterAlgorithm algo) {
     case ClusterAlgorithm::KMeans: return "kmeans";
     case ClusterAlgorithm::Spectral: return "spectral";
     case ClusterAlgorithm::GCBD: return "gcbd";
+    case ClusterAlgorithm::HDBSCAN: return "hdbscan";
+    case ClusterAlgorithm::CC3D: return "cc3d";
+    case ClusterAlgorithm::CC3DOptimized: return "cc3d_optimized";
   }
   return "unknown";
 }
 
 std::vector<std::string> listAlgorithms() {
   return {"bls", "traditional_dfs", "skip_dfs", "dbscan",
-          "hierarchical", "kmeans", "spectral", "gcbd"};
+          "hierarchical", "kmeans", "spectral", "gcbd", "hdbscan", "cc3d", "cc3d_optimized"};
 }
 
 ClusterResult runClusterAlgorithm(
@@ -102,6 +109,12 @@ ClusterResult runClusterAlgorithm(
       return spectral(params.nx, params.ny, params.nz, params.k, occupancy, visited);
     case ClusterAlgorithm::GCBD:
       return gcbd(params.nx, params.ny, params.nz, occupancy, visited);
+    case ClusterAlgorithm::HDBSCAN:
+      return hdbscan(params.nx, params.ny, params.nz, params.minClusterSize, params.minSamples, occupancy, visited);
+    case ClusterAlgorithm::CC3D:
+      return cc3d(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited);
+    case ClusterAlgorithm::CC3DOptimized:
+      return cc3dOptimized(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited);
   }
   throw std::runtime_error("Unhandled algorithm type");
 }
@@ -710,6 +723,365 @@ ClusterResult gcbd(
           int ni = i + deltas6[d][0];
           int nj = j + deltas6[d][1];
           int nk = k + deltas6[d][2];
+          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+            std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
+            if (occupancy[nIdx] == 1) {
+              unite(static_cast<int>(idx), static_cast<int>(nIdx));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Count clusters
+  std::vector<int> clusterSizeMap(totalSize, 0);
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] == 1) {
+          int root = find(static_cast<int>(idx));
+          clusterSizeMap[root]++;
+          visited[idx] = 1;
+          result.visitedVoxels++;
+        }
+      }
+    }
+  }
+
+  for (std::size_t i = 0; i < totalSize; ++i) {
+    if (clusterSizeMap[i] > 0) {
+      result.nclusters++;
+      result.clusterSizes.push_back(clusterSizeMap[i]);
+      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+// HDBSCAN (Hierarchical Density-Based Spatial Clustering)
+// Simplified implementation for fair benchmarking
+ClusterResult hdbscan(
+    int nx, int ny, int nz,
+    int minClusterSize, int minSamples,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  std::fill(visited.begin(), visited.end(), 0);
+
+  // Collect occupied points
+  std::vector<Point> points;
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] == 1) {
+          points.push_back({i, j, k});
+        }
+      }
+    }
+  }
+
+  int numPoints = static_cast<int>(points.size());
+  if (numPoints == 0) {
+    result.elapsedMs = timer.elapsedMilliseconds();
+    return result;
+  }
+
+  // Compute core distances (distance to minSamples-th nearest neighbor)
+  std::vector<double> coreDistances(numPoints);
+  for (int p = 0; p < numPoints; ++p) {
+    std::vector<double> distances;
+    distances.reserve(numPoints);
+
+    for (int q = 0; q < numPoints; ++q) {
+      if (p == q) continue;
+      double dist = std::sqrt(
+          std::pow(points[p].i - points[q].i, 2) +
+          std::pow(points[p].j - points[q].j, 2) +
+          std::pow(points[p].k - points[q].k, 2));
+      distances.push_back(dist);
+    }
+
+    std::sort(distances.begin(), distances.end());
+    int kIdx = std::min(minSamples - 1, static_cast<int>(distances.size()) - 1);
+    coreDistances[p] = kIdx >= 0 ? distances[kIdx] : 0.0;
+  }
+
+  // Build mutual reachability distance graph using Union-Find
+  // Mutual reachability = max(core_dist(a), core_dist(b), dist(a,b))
+  struct Edge {
+    int p1, p2;
+    double weight;
+    bool operator<(const Edge& other) const { return weight < other.weight; }
+  };
+
+  std::vector<Edge> edges;
+  edges.reserve(numPoints * numPoints / 2);
+
+  for (int p = 0; p < numPoints; ++p) {
+    for (int q = p + 1; q < numPoints; ++q) {
+      double dist = std::sqrt(
+          std::pow(points[p].i - points[q].i, 2) +
+          std::pow(points[p].j - points[q].j, 2) +
+          std::pow(points[p].k - points[q].k, 2));
+      double mutualReach = std::max({coreDistances[p], coreDistances[q], dist});
+      edges.push_back({p, q, mutualReach});
+    }
+  }
+
+  // Sort edges by mutual reachability distance
+  std::sort(edges.begin(), edges.end());
+
+  // Build minimum spanning tree using Kruskal's algorithm with Union-Find
+  std::vector<UnionFind> uf(numPoints);
+  for (int i = 0; i < numPoints; ++i) {
+    uf[i].parent = i;
+    uf[i].rank = 0;
+  }
+
+  auto find = [&](int x) {
+    while (uf[x].parent != x) {
+      uf[x].parent = uf[uf[x].parent].parent;
+      x = uf[x].parent;
+    }
+    return x;
+  };
+
+  auto unite = [&](int x, int y) -> bool {
+    int rootX = find(x);
+    int rootY = find(y);
+    if (rootX == rootY) return false;
+
+    if (uf[rootX].rank < uf[rootY].rank) {
+      uf[rootX].parent = rootY;
+    } else if (uf[rootX].rank > uf[rootY].rank) {
+      uf[rootY].parent = rootX;
+    } else {
+      uf[rootY].parent = rootX;
+      uf[rootX].rank++;
+    }
+    return true;
+  };
+
+  // Process edges in order, cutting at appropriate threshold
+  // Simplified: cut the MST where edge weight exceeds median mutual reachability
+  double medianWeight = edges.empty() ? 0.0 : edges[edges.size() / 2].weight;
+
+  for (const auto& edge : edges) {
+    // Only connect points if mutual reachability is not too large
+    if (edge.weight <= medianWeight * 1.5) {
+      unite(edge.p1, edge.p2);
+    }
+  }
+
+  // Extract clusters and filter by minimum cluster size
+  std::vector<int> clusterSizeMap(numPoints, 0);
+  for (int i = 0; i < numPoints; ++i) {
+    int root = find(i);
+    clusterSizeMap[root]++;
+  }
+
+  // Assign cluster labels only to clusters >= minClusterSize
+  std::vector<int> clusterLabels(numPoints, -1);
+  int clusterId = 0;
+  for (int i = 0; i < numPoints; ++i) {
+    if (clusterSizeMap[i] >= minClusterSize && clusterLabels[find(i)] == -1) {
+      clusterLabels[find(i)] = clusterId++;
+    }
+  }
+
+  // Map back to voxel grid and count final clusters
+  std::vector<int> finalClusterSizes(clusterId, 0);
+  for (int i = 0; i < numPoints; ++i) {
+    int root = find(i);
+    int label = clusterLabels[root];
+
+    if (label >= 0) {
+      finalClusterSizes[label]++;
+      std::size_t occIdx = idx3(points[i].i, points[i].j, points[i].k, ny, nz);
+      visited[occIdx] = 1;
+      result.visitedVoxels++;
+    }
+  }
+
+  // Populate result
+  result.nclusters = clusterId;
+  for (int size : finalClusterSizes) {
+    if (size > 0) {
+      result.clusterSizes.push_back(size);
+      result.maxCluster = std::max(result.maxCluster, size);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+// CC3D (Connected Components 3D) - Fair basic implementation
+// Uses basic Union-Find WITHOUT path compression or union-by-rank
+// This ensures fair comparison with BLS at equivalent optimization levels
+ClusterResult cc3d(
+    int nx, int ny, int nz,
+    int connectivity,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  std::fill(visited.begin(), visited.end(), 0);
+
+  // 26-connectivity deltas (includes 6-connectivity as subset)
+  constexpr int deltas26[26][3] = {
+      // Face neighbors (6-connectivity)
+      {-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1},
+      // Edge neighbors
+      {-1, -1, 0}, {-1, 1, 0}, {1, -1, 0}, {1, 1, 0},
+      {-1, 0, -1}, {-1, 0, 1}, {1, 0, -1}, {1, 0, 1},
+      {0, -1, -1}, {0, -1, 1}, {0, 1, -1}, {0, 1, 1},
+      // Corner neighbors
+      {-1, -1, -1}, {-1, -1, 1}, {-1, 1, -1}, {-1, 1, 1},
+      {1, -1, -1}, {1, -1, 1}, {1, 1, -1}, {1, 1, 1}
+  };
+
+  int numNeighbors = (connectivity == 26) ? 26 : 6;
+
+  // Basic Union-Find WITHOUT path compression or union-by-rank
+  UnionFindBasic uf(totalSize);
+
+  // Build connectivity
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] != 1) continue;
+
+        for (int d = 0; d < numNeighbors; ++d) {
+          int ni = i + deltas26[d][0];
+          int nj = j + deltas26[d][1];
+          int nk = k + deltas26[d][2];
+          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+            std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
+            if (occupancy[nIdx] == 1) {
+              uf.unite(static_cast<int>(idx), static_cast<int>(nIdx));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Count clusters
+  std::vector<int> clusterSizeMap(totalSize, 0);
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] == 1) {
+          int root = uf.find(static_cast<int>(idx));
+          clusterSizeMap[root]++;
+          visited[idx] = 1;
+          result.visitedVoxels++;
+        }
+      }
+    }
+  }
+
+  for (std::size_t i = 0; i < totalSize; ++i) {
+    if (clusterSizeMap[i] > 0) {
+      result.nclusters++;
+      result.clusterSizes.push_back(clusterSizeMap[i]);
+      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+// CC3D Optimized - Uses path compression and union-by-rank
+// For reference comparison only (not for fair benchmarking against BLS)
+ClusterResult cc3dOptimized(
+    int nx, int ny, int nz,
+    int connectivity,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  std::fill(visited.begin(), visited.end(), 0);
+
+  // 26-connectivity deltas (includes 6-connectivity as subset)
+  constexpr int deltas26[26][3] = {
+      // Face neighbors (6-connectivity)
+      {-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1},
+      // Edge neighbors
+      {-1, -1, 0}, {-1, 1, 0}, {1, -1, 0}, {1, 1, 0},
+      {-1, 0, -1}, {-1, 0, 1}, {1, 0, -1}, {1, 0, 1},
+      {0, -1, -1}, {0, -1, 1}, {0, 1, -1}, {0, 1, 1},
+      // Corner neighbors
+      {-1, -1, -1}, {-1, -1, 1}, {-1, 1, -1}, {-1, 1, 1},
+      {1, -1, -1}, {1, -1, 1}, {1, 1, -1}, {1, 1, 1}
+  };
+
+  int numNeighbors = (connectivity == 26) ? 26 : 6;
+
+  // Union-Find structure WITH path compression and union-by-rank
+  std::vector<int> parent(totalSize);
+  std::vector<int> rank(totalSize, 0);
+
+  for (std::size_t i = 0; i < totalSize; ++i) {
+    parent[i] = static_cast<int>(i);
+  }
+
+  auto find = [&](int x) {
+    while (parent[x] != x) {
+      parent[x] = parent[parent[x]];  // Path compression
+      x = parent[x];
+    }
+    return x;
+  };
+
+  auto unite = [&](int x, int y) {
+    int rootX = find(x);
+    int rootY = find(y);
+    if (rootX != rootY) {
+      // Union by rank
+      if (rank[rootX] < rank[rootY]) {
+        parent[rootX] = rootY;
+      } else if (rank[rootX] > rank[rootY]) {
+        parent[rootY] = rootX;
+      } else {
+        parent[rootY] = rootX;
+        rank[rootX]++;
+      }
+    }
+  };
+
+  // Build connectivity
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] != 1) continue;
+
+        for (int d = 0; d < numNeighbors; ++d) {
+          int ni = i + deltas26[d][0];
+          int nj = j + deltas26[d][1];
+          int nk = k + deltas26[d][2];
           if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
             std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
             if (occupancy[nIdx] == 1) {

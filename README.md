@@ -6,11 +6,11 @@ PLUMED structure while staying dependency-light and easy to integrate downstream
 
 ## Features
 - **Multi-format trajectory support**: XTC, TRR, TNG (via optional libraries), GRO, PDB, XYZ, and MOL/SDF formats.
-- **Multiple clustering algorithms**: Choose from 8 different algorithms including BLS (default), traditional DFS, skip-DFS, DBSCAN, hierarchical, k-means, spectral, and GCBD (union-find).
+- **Multiple clustering algorithms**: Choose from 10 different algorithms including BLS (default), traditional DFS, skip-DFS, DBSCAN, hierarchical, k-means, spectral, GCBD (union-find), HDBSCAN, and CC3D.
 - **PLUMED-style configuration** file with full control over lattice, connectivity, stride, and BLS parameters.
 - **Per-frame CSV and JSON metrics** including cluster counts, seed hits, refined voxels, and timing.
 - **Optional benchmark sidecar** with cumulative time and RSS, and comparison utilities against PLUMED DFS output.
-- **Unit tests** covering lattice geometry, connectivity modes, PBC handling, and determinism.
+- **Unit tests** covering lattice geometry, connectivity modes, PBC handling, determinism, and algorithm correctness.
 - **Pure implementations**: All clustering algorithms kept in simple form for fair benchmarking without optimized libraries.
 
 ## Build
@@ -35,13 +35,13 @@ docker run --rm bls-analyzer --help
 ## Usage
 
 ```bash
-./bls_analyze --traj traj.xtc --top topol.gro --conf bls.in \
+./bls_analyze --system traj.xtc --top topol.gro --conf bls.in \
               --out metrics.csv --json metrics.json --stride 5
 ```
 
 ### Supported File Formats
 
-**Trajectory files** (via `--traj`):
+**Molecular system files** (via `--system`):
 - **XTC** (GROMACS compressed trajectory)
 - **TRR** (GROMACS full-precision trajectory)
 - **TNG** (GROMACS next-generation format, requires TNG library)
@@ -64,6 +64,9 @@ Select a clustering algorithm using `--algo ALGORITHM`:
 - **`kmeans`** - K-means clustering
 - **`spectral`** - Simplified spectral clustering
 - **`gcbd`** - Grid-based connectivity using union-find
+- **`hdbscan`** - Hierarchical DBSCAN (density-based hierarchical clustering)
+- **`cc3d`** - Connected Components 3D (fair: basic Union-Find for benchmarking)
+- **`cc3d_optimized`** - CC3D with optimizations (reference only, not for fair comparison)
 
 **Algorithm-specific parameters:**
 - `--algo-skip N` - Skip distance for skip_dfs (default: 3)
@@ -71,17 +74,29 @@ Select a clustering algorithm using `--algo ALGORITHM`:
 - `--algo-minpts N` - MinPts for DBSCAN (default: 10)
 - `--algo-k N` - K for k-means/spectral (default: 20)
 - `--algo-threshold F` - Threshold for hierarchical (default: 4.0)
+- `--algo-minclustersize N` - Minimum cluster size for HDBSCAN (default: 5)
+- `--algo-minsamples N` - Minimum samples for HDBSCAN core points (default: 5)
+- `--algo-connectivity N` - Connectivity for CC3D/CC3D_optimized: 6 or 26 (default: 6)
 
 **Example with algorithm selection:**
 ```bash
 # Use GCBD (fast union-find clustering)
-./bls_analyze --traj validation/g1000_20Ih.pdb --conf bls.in --algo gcbd
+./bls_analyze --system validation/g1000_20Ih.pdb --conf bls.in --algo gcbd
 
 # Use DBSCAN with custom parameters
-./bls_analyze --traj traj.xyz --conf bls.in --algo dbscan --algo-eps 2.5 --algo-minpts 15
+./bls_analyze --system traj.xyz --conf bls.in --algo dbscan --algo-eps 2.5 --algo-minpts 15
+
+# Use HDBSCAN for hierarchical density-based clustering
+./bls_analyze --system traj.pdb --conf bls.in --algo hdbscan --algo-minclustersize 10 --algo-minsamples 5
+
+# Use CC3D with 26-connectivity (fair comparison)
+./bls_analyze --system traj.gro --conf bls.in --algo cc3d --algo-connectivity 26
+
+# Use optimized CC3D (reference only, not for fair comparison)
+./bls_analyze --system traj.gro --conf bls.in --algo cc3d_optimized --algo-connectivity 26
 
 # Use traditional DFS
-./bls_analyze --traj traj.xtc --conf bls.in --algo traditional_dfs
+./bls_analyze --system traj.xtc --conf bls.in --algo traditional_dfs
 ```
 
 ### Optional Flags
@@ -98,7 +113,7 @@ The configuration file uses a PLUMED-style format. All parameters are optional a
 ```
 BLS ...
   # Atom selection
-  GROUP ATOMS=all                    # 'all' or index ranges like '1-100' or names like 'name:CA'
+  GROUP ATOMS=all                    # 'all', index ranges like 'index:1-100', or names like 'name:O,H'
 
   # Box configuration
   BOX AUTO                           # AUTO (use trajectory box) or MANUAL with xlo,xhi,ylo,yhi,zlo,zhi
@@ -125,6 +140,12 @@ BLS ...
   OUTPUT NCLUSTERS,MAX_CLUSTER,SEED_HITS,SEEDS,REFINED_VOXELS
 ... BLS
 ```
+
+**Atom Selection Examples:**
+- `GROUP ATOMS=all` - Use all atoms in the system
+- `GROUP ATOMS=index:1-100` - Use atoms 1 through 100
+- `GROUP ATOMS=name:O` - Use only oxygen atoms (requires topology file via `--top`)
+- `GROUP ATOMS=name:O,H` - Use oxygen and hydrogen atoms
 
 A fully commented example is available in `validation/bls_test.in`.
 
@@ -166,10 +187,45 @@ This design allows researchers to:
 3. Benchmark BLS lattice sampling against traditional clustering methods
 4. Maintain reproducible, transparent algorithm implementations
 
+### Fair vs Reference Implementations
+
+For **scientific publication and fair benchmarking**, use these algorithms at equivalent optimization levels:
+- `bls`, `traditional_dfs`, `skip_dfs`, `dbscan`, `kmeans`, `spectral`, `cc3d`
+
+For **reference context only** (demonstrate optimization ceilings, not for fair comparison):
+- `cc3d_optimized`, `gcbd`, `hierarchical`, `hdbscan`
+
+The reference implementations use advanced data structure optimizations (path compression, union-by-rank) that reduce algorithmic complexity beyond what's present in BLS. For details on implementation fairness, see:
+- **Quick reference**: `FAIR_CC3D_IMPLEMENTATION.md`
+- **Comprehensive documentation**: `docs/ALGORITHM_FAIRNESS.md`
+- **Audit report**: `docs/FAIRNESS_AUDIT_SUMMARY.md`
+
 For production use cases requiring maximum performance, consider:
 - Using optimized library implementations (scipy, sklearn, etc.) in Python
 - Enabling compiler optimizations (`-O3 -march=native`)
 - Profiling and optimizing the hot paths specific to your workload
+
+### Algorithm Details
+
+**HDBSCAN (Hierarchical Density-Based Spatial Clustering of Applications with Noise)**
+- Hierarchical extension of DBSCAN that builds a cluster hierarchy based on density
+- Computes core distances (k-nearest neighbor distances) for each point
+- Builds a mutual reachability distance graph
+- Constructs minimum spanning tree to extract stable clusters
+- Parameters: `--algo-minclustersize` (minimum points per cluster), `--algo-minsamples` (minimum neighbors for core points)
+- Complexity: O(n²) in this simplified implementation (production implementations use spatial indexing for O(n log n))
+
+**CC3D (Connected Components 3D) - Two Implementations for Fair Comparison**
+- **`cc3d` (Fair Basic)**: Uses basic Union-Find WITHOUT path compression or union-by-rank
+  - Complexity: O(n²) worst case for n union operations
+  - **Use this for fair benchmarking against BLS** - equivalent optimization level
+  - Direct competitor to BLS's lattice-seeding approach
+- **`cc3d_optimized` (Reference)**: Uses optimized Union-Find WITH path compression and union-by-rank
+  - Complexity: O(n α(n)) where α is the inverse Ackermann function (nearly linear)
+  - **For reference only** - demonstrates optimization ceiling, not for fair comparison
+- Configurable connectivity: 6 (face neighbors) or 26 (face+edge+corner neighbors)
+- Parameter: `--algo-connectivity` (6 or 26)
+- See `FAIR_CC3D_IMPLEMENTATION.md` and `docs/ALGORITHM_FAIRNESS.md` for details
 
 ## Status
 

@@ -28,7 +28,7 @@ namespace bls {
 namespace {
 
 void printUsage() {
-  std::cout << "Usage: bls_analyze --traj traj.xtc --conf bls.in [options]\n"
+  std::cout << "Usage: bls_analyze --system traj.xtc --conf bls.in [options]\n"
                "Options:\n"
                "  --top PATH             Topology file (.gro/.pdb/.xyz)\n"
                "  --out metrics.csv      CSV output path (defaults to stdout)\n"
@@ -38,7 +38,7 @@ void printUsage() {
                "  --start N              Skip frames before index N\n"
                "  --stop N               Stop after frame index N (inclusive)\n"
                "  --threads N            Number of OpenMP threads (if enabled)\n"
-               "  --format F             Override trajectory format (xtc,trr,gro,pdb,xyz,mol,sdf)\n"
+               "  --format F             Override molecular system format (xtc,trr,gro,pdb,xyz,mol,sdf)\n"
                "  --algo ALGORITHM       Clustering algorithm to use:\n"
                "                           bls (default) - Bravais Lattice Sampling\n"
                "                           traditional_dfs - Traditional DFS\n"
@@ -48,11 +48,17 @@ void printUsage() {
                "                           kmeans - K-means clustering\n"
                "                           spectral - Spectral clustering (simplified)\n"
                "                           gcbd - Union-Find grid connectivity\n"
+               "                           hdbscan - Hierarchical DBSCAN\n"
+               "                           cc3d - Connected Components 3D (fair: basic Union-Find)\n"
+               "                           cc3d_optimized - CC3D with optimizations (reference only)\n"
                "  --algo-skip N          Skip distance for skip_dfs (default: 3)\n"
                "  --algo-eps F           Epsilon for DBSCAN (default: 3.0)\n"
                "  --algo-minpts N        MinPts for DBSCAN (default: 10)\n"
                "  --algo-k N             K for k-means/spectral (default: 20)\n"
                "  --algo-threshold F     Threshold for hierarchical (default: 4.0)\n"
+               "  --algo-minclustersize N  Minimum cluster size for HDBSCAN (default: 5)\n"
+               "  --algo-minsamples N    Minimum samples for HDBSCAN (default: 5)\n"
+               "  --algo-connectivity N  Connectivity for CC3D: 6 or 26 (default: 6)\n"
                "  --compare-plumed PATH  Reference PLUMED CSV/COLVAR\n"
                "  --quiet                Reduce logging\n"
                "  --help                 Show this message\n";
@@ -195,8 +201,8 @@ int main(int argc, char** argv) {
   try {
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
-      if (arg == "--traj") {
-        opts.trajectoryPath = requireArg(i, arg);
+      if (arg == "--system") {
+        opts.systemPath = requireArg(i, arg);
       } else if (arg == "--top") {
         opts.topologyPath = requireArg(i, arg);
       } else if (arg == "--conf") {
@@ -230,6 +236,12 @@ int main(int argc, char** argv) {
         opts.algoK = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--algo-threshold") {
         opts.algoThreshold = safeParseDouble(requireArg(i, arg), arg);
+      } else if (arg == "--algo-minclustersize") {
+        opts.algoMinClusterSize = safeParseInt(requireArg(i, arg), arg);
+      } else if (arg == "--algo-minsamples") {
+        opts.algoMinSamples = safeParseInt(requireArg(i, arg), arg);
+      } else if (arg == "--algo-connectivity") {
+        opts.algoConnectivity = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--compare-plumed") {
         opts.comparePlumedPath = requireArg(i, arg);
       } else if (arg == "--quiet") {
@@ -248,8 +260,8 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  if (opts.trajectoryPath.empty() || opts.configPath.empty()) {
-    std::cerr << "Error: --traj and --conf are required.\n";
+  if (opts.systemPath.empty() || opts.configPath.empty()) {
+    std::cerr << "Error: --system and --conf are required.\n";
     return EXIT_FAILURE;
   }
 
@@ -273,9 +285,9 @@ int main(int argc, char** argv) {
     topoPtr = &topo;
   }
 
-  auto reader = makeTrajectoryReader(opts.trajectoryPath, opts.formatOverride, err);
+  auto reader = makeTrajectoryReader(opts.systemPath, opts.formatOverride, err);
   if (!reader) {
-    std::cerr << "Trajectory error: " << err << "\n";
+    std::cerr << "Molecular system error: " << err << "\n";
     return EXIT_FAILURE;
   }
 
@@ -355,7 +367,7 @@ int main(int argc, char** argv) {
     Frame current;
     if (!reader->read(current, err)) {
       if (!err.empty()) {
-        std::cerr << "Trajectory read error: " << err << "\n";
+        std::cerr << "System read error: " << err << "\n";
         return EXIT_FAILURE;
       }
       break;
@@ -515,7 +527,9 @@ int main(int argc, char** argv) {
       params.minPts = opts.algoMinPts;
       params.k = opts.algoK;
       params.threshold = opts.algoThreshold;
-      params.connectivity = config.connectivity;
+      params.connectivity = opts.algoConnectivity != 6 ? opts.algoConnectivity : config.connectivity;
+      params.minClusterSize = opts.algoMinClusterSize;
+      params.minSamples = opts.algoMinSamples;
 
       // Run the selected algorithm
       ClusterResult result = runClusterAlgorithm(

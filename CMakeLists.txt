@@ -25,6 +25,7 @@ set(core_sources
     src/bls/BLS.cpp
     src/bls/Comparison.cpp
     src/cluster/Algorithms.cpp
+    src/cluster/UnionFindBasic.cpp
     src/util/RSS.cpp)
 
 add_library(bls_core STATIC ${core_sources})
@@ -82,3 +83,11 @@ if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
                                              INSTALL_RPATH "${_bls_xdr_rpath}")
 endif()
 add_test(NAME bls_basic COMMAND test_basic)
+
+add_executable(test_cc3d_fairness tests/test_cc3d_fairness.cpp)
+target_link_libraries(test_cc3d_fairness PRIVATE bls_core)
+if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
+  set_target_properties(test_cc3d_fairness PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
+                                                      INSTALL_RPATH "${_bls_xdr_rpath}")
+endif()
+add_test(NAME cc3d_fairness COMMAND test_cc3d_fairness)

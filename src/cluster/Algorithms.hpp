@@ -15,7 +15,10 @@ enum class ClusterAlgorithm {
   Hierarchical,  // Single-linkage hierarchical
   KMeans,        // K-means clustering
   Spectral,      // Simplified spectral clustering
-  GCBD           // Union-Find based clustering
+  GCBD,          // Union-Find based clustering
+  HDBSCAN,       // Hierarchical DBSCAN
+  CC3D,          // Connected Components 3D (fair: basic Union-Find)
+  CC3DOptimized  // Connected Components 3D (optimized: path compression + union-by-rank)
 };
 
 // Convert string to algorithm enum
@@ -45,6 +48,8 @@ struct ClusterParams {
   int k{20};                    // Number of clusters for k-means
   double threshold{4.0};        // Threshold for hierarchical clustering
   int connectivity{6};          // 6 or 26 connectivity
+  int minClusterSize{5};        // Minimum cluster size for HDBSCAN
+  int minSamples{5};            // Minimum samples for HDBSCAN core points
 };
 
 // Run a clustering algorithm on the given occupancy grid
@@ -101,6 +106,30 @@ ClusterResult spectral(
 // GCBD (Grid-based Connectivity using Union-Find)
 ClusterResult gcbd(
     int nx, int ny, int nz,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// HDBSCAN (Hierarchical Density-Based Spatial Clustering)
+ClusterResult hdbscan(
+    int nx, int ny, int nz,
+    int minClusterSize, int minSamples,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// CC3D (Connected Components 3D) - Fair basic implementation
+// Uses basic Union-Find WITHOUT path compression or union-by-rank
+// This ensures fair comparison with BLS at equivalent optimization levels
+ClusterResult cc3d(
+    int nx, int ny, int nz,
+    int connectivity,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// CC3D Optimized - Uses path compression and union-by-rank
+// For reference comparison only (not for fair benchmarking against BLS)
+ClusterResult cc3dOptimized(
+    int nx, int ny, int nz,
+    int connectivity,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited);
 

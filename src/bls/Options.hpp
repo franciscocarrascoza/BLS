@@ -9,7 +9,7 @@
 namespace bls {
 
 struct ProgramOptions {
-  std::string trajectoryPath;
+  std::string systemPath;
   std::string topologyPath;
   std::string configPath;
   std::string outputCsvPath;
@@ -31,6 +31,9 @@ struct ProgramOptions {
   int algoMinPts{10};        // MinPts for DBSCAN
   int algoK{20};             // K for k-means/spectral
   double algoThreshold{4.0}; // Threshold for hierarchical
+  int algoMinClusterSize{5}; // Minimum cluster size for HDBSCAN
+  int algoMinSamples{5};     // Minimum samples for HDBSCAN
+  int algoConnectivity{6};   // Connectivity for CC3D (6 or 26)
 };
 
 enum class GroupSelectorType { All, IndexRange, Name };
