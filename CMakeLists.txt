@@ -139,3 +139,11 @@ if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
                                                       INSTALL_RPATH "${_bls_xdr_rpath}")
 endif()
 add_test(NAME cc3d_fairness COMMAND test_cc3d_fairness)
+
+add_executable(test_geometry tests/test_geometry.cpp)
+target_link_libraries(test_geometry PRIVATE bls_core)
+if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
+  set_target_properties(test_geometry PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
+                                                 INSTALL_RPATH "${_bls_xdr_rpath}")
+endif()
+add_test(NAME geometry COMMAND test_geometry)

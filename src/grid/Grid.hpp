@@ -35,6 +35,14 @@ class Grid {
   const Vec3& origin() const { return origin_; }
 
  private:
+  // Grants tests/test_geometry.cpp access to the geometry primitives below.
+  // They are pure functions of the configured box with no class invariant to
+  // protect; they are private only because production code has no caller
+  // outside Grid. Property-testing them directly is the whole point of the
+  // accessor -- exercising them through rasterize() alone cannot separate a
+  // fault in fractional() from a fault in the stencil that consumes it.
+  friend struct GridTestAccess;
+
   std::size_t index(int ix, int iy, int iz) const;
   Vec3 fractional(const Vec3& pos, Vec3* wrapped) const;
   Vec3 voxelCenter(int ix, int iy, int iz) const;
