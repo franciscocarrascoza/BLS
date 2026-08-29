@@ -168,3 +168,12 @@ endif()
 #   ./build/test_differential 5000
 add_test(NAME differential COMMAND test_differential 1500)
 set_tests_properties(differential PROPERTIES TIMEOUT 600)
+
+add_executable(test_metamorphic tests/test_metamorphic.cpp)
+target_link_libraries(test_metamorphic PRIVATE bls_core)
+if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
+  set_target_properties(test_metamorphic PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
+                                                    INSTALL_RPATH "${_bls_xdr_rpath}")
+endif()
+add_test(NAME metamorphic COMMAND test_metamorphic)
+set_tests_properties(metamorphic PROPERTIES TIMEOUT 900)
