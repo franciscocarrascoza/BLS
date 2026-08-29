@@ -155,3 +155,16 @@ if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
                                                INSTALL_RPATH "${_bls_xdr_rpath}")
 endif()
 add_test(NAME labels COMMAND test_labels)
+
+add_executable(test_differential tests/test_differential.cpp)
+target_link_libraries(test_differential PRIVATE bls_core)
+if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
+  set_target_properties(test_differential PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
+                                                     INSTALL_RPATH "${_bls_xdr_rpath}")
+endif()
+# The full sweep is 5000 random grids (~2.5 min). ctest runs a 1500-grid
+# subset so the suite stays usable in a loop; the structured cases and the
+# harness self-check run in full either way. Run the complete sweep with:
+#   ./build/test_differential 5000
+add_test(NAME differential COMMAND test_differential 1500)
+set_tests_properties(differential PROPERTIES TIMEOUT 600)
