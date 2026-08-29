@@ -214,7 +214,8 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
 
   if (!impl_->configured || nx != impl_->grid.nx() || ny != impl_->grid.ny() ||
       nz != impl_->grid.nz()) {
-    impl_->grid.configure(nx, ny, nz, config_.gridSpacing, activeBox, origin);
+    impl_->grid.configure(nx, ny, nz, config_.gridSpacing, activeBox, origin,
+                          periodicityForBoxMode(config_.boxMode));
     impl_->configured = true;
   } else {
     impl_->grid.reset();

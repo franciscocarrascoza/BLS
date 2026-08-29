@@ -9,20 +9,19 @@
 
 namespace bls {
 
-void Grid::configure(int nx, int ny, int nz, double spacing, const Mat3& box, const Vec3& origin) {
+void Grid::configure(int nx, int ny, int nz, double spacing, const Mat3& box, const Vec3& origin,
+                     BoxPeriodicity periodicity) {
   nx_ = nx;
   ny_ = ny;
   nz_ = nz;
   spacing_ = spacing;
   box_ = box;
   origin_ = origin;
+  periodicity_ = periodicity;
   inverseBox_ = inverse(box_);
   cellVecX_ = box_.column(0) / static_cast<double>(nx_);
   cellVecY_ = box_.column(1) / static_cast<double>(ny_);
   cellVecZ_ = box_.column(2) / static_cast<double>(nz_);
-  maxEdgeLength_ =
-      std::max({norm(cellVecX_), norm(cellVecY_), norm(cellVecZ_), std::numeric_limits<double>::min()});
-
   Vec3 halfX = cellVecX_ * 0.5;
   Vec3 halfY = cellVecY_ * 0.5;
   Vec3 halfZ = cellVecZ_ * 0.5;
@@ -36,6 +35,25 @@ void Grid::configure(int nx, int ny, int nz, double spacing, const Mat3& box, co
       }
     }
   }
+
+  // Per-axis conversion from a Cartesian distance to a lattice-index reach.
+  //
+  // The neighbour stencil used to be sized from the single scalar
+  // maxEdgeLength_ = max(|cellVecX|, |cellVecY|, |cellVecZ|), which understates
+  // the number of index steps needed along any *shorter* cell vector and so
+  // truncated the rasterised sphere along the short axes. Cubic grids were
+  // exact (all three edges equal, and the ceil() supplied the rest), which is
+  // why this went unnoticed; the reference triclinic basis lost 13.7% of the
+  // voxels it should have marked at radius 5.
+  //
+  // The exact statement: for a voxel-cell matrix V (columns cellVecX/Y/Z), a
+  // Cartesian displacement d corresponds to the index displacement V^-1 d, so
+  // |(V^-1 d)_k| <= ||row_k(V^-1)|| * |d|. Since V = box * diag(1/nx,1/ny,1/nz),
+  // row k of V^-1 is n_k times row k of inverseBox_ -- no second inversion, and
+  // no new failure mode beyond the one inverse(box_) above already covers.
+  indexReachPerLength_[0] = static_cast<double>(nx_) * norm(inverseBox_.row(0));
+  indexReachPerLength_[1] = static_cast<double>(ny_) * norm(inverseBox_.row(1));
+  indexReachPerLength_[2] = static_cast<double>(nz_) * norm(inverseBox_.row(2));
 
   occ_.assign(size(), 0);
   visited_.assign(size(), 0);
@@ -55,9 +73,15 @@ std::size_t Grid::index(int ix, int iy, int iz) const {
 Vec3 Grid::fractional(const Vec3& pos, Vec3* wrapped) const {
   Vec3 rel = pos - origin_;
   Vec3 frac = inverseBox_ * rel;
-  frac.x -= std::floor(frac.x);
-  frac.y -= std::floor(frac.y);
-  frac.z -= std::floor(frac.z);
+  // Fold into the cell only when the box is a periodic one. For a synthesised
+  // bounding box, folding an outlying atom onto the opposite face would be a
+  // fabrication; it is left where it is, and the stencil below clips whatever
+  // falls outside the grid. See BoxPeriodicity in bls/Options.hpp.
+  if (periodicity_ == BoxPeriodicity::Periodic) {
+    frac.x -= std::floor(frac.x);
+    frac.y -= std::floor(frac.y);
+    frac.z -= std::floor(frac.z);
+  }
   if (wrapped) {
     *wrapped = origin_ + box_ * frac;
   }
@@ -81,8 +105,17 @@ void Grid::rasterize(const std::vector<Vec3>& positions, const std::vector<int>*
   const double radius = std::max(0.0, cutoffLength);
   const double anyRadius = radius + maxCornerDistance_;
   const double allRadius = radius - maxCornerDistance_;
-  const int reach =
-      radius > 0.0 ? static_cast<int>(std::ceil((radius + maxCornerDistance_) / maxEdgeLength_)) : 0;
+  // One reach per axis. A single scalar reach truncates the sphere along
+  // whichever cell vector is shorter than the longest; see the derivation of
+  // indexReachPerLength_ in configure(). The +0.5 covers the atom's own
+  // position within its base voxel, which contributes up to half an index step.
+  int reach[3] = {0, 0, 0};
+  if (radius > 0.0) {
+    for (int k = 0; k < 3; ++k) {
+      reach[k] = static_cast<int>(std::ceil(anyRadius * indexReachPerLength_[k] + 0.5));
+    }
+  }
+  const bool periodic = periodicity_ == BoxPeriodicity::Periodic;
 
   auto handleAtom = [&](const Vec3& pos) {
     Vec3 wrapped;
@@ -90,12 +123,31 @@ void Grid::rasterize(const std::vector<Vec3>& positions, const std::vector<int>*
     int ix = static_cast<int>(std::floor(frac.x * nx_));
     int iy = static_cast<int>(std::floor(frac.y * ny_));
     int iz = static_cast<int>(std::floor(frac.z * nz_));
-    if (ix >= nx_) ix = nx_ - 1;
-    if (iy >= ny_) iy = ny_ - 1;
-    if (iz >= nz_) iz = nz_ - 1;
+    if (periodic) {
+      // frac is in [0,1) by construction, so this only catches the case where
+      // a value a hair below 1 rounds up to exactly nx_.
+      if (ix >= nx_) ix = nx_ - 1;
+      if (iy >= ny_) iy = ny_ - 1;
+      if (iz >= nz_) iz = nz_ - 1;
+    }
+    // Non-periodic: an atom genuinely outside the grid keeps its out-of-range
+    // base index. Clamping it would teleport its footprint onto the near face;
+    // visit() clips instead, so it still marks the in-range voxels that are
+    // actually within reach of where it is.
 
     const auto visit = [&](int vx, int vy, int vz, bool isBase) {
-      if (vx < 0 || vy < 0 || vz < 0 || vx >= nx_ || vy >= ny_ || vz >= nz_) return;
+      int sx = vx, sy = vy, sz = vz;  // storage indices
+      if (periodic) {
+        // Wrap the STORAGE index but measure the distance from the unwrapped
+        // voxel centre, which is the correct periodic image. Wrapping first and
+        // then measuring would compare against a voxel on the far side of the
+        // box and reject every neighbour that crosses a face.
+        sx = ((vx % nx_) + nx_) % nx_;
+        sy = ((vy % ny_) + ny_) % ny_;
+        sz = ((vz % nz_) + nz_) % nz_;
+      } else if (vx < 0 || vy < 0 || vz < 0 || vx >= nx_ || vy >= ny_ || vz >= nz_) {
+        return;
+      }
       Vec3 center = voxelCenter(vx, vy, vz);
       double dist = norm(wrapped - center);
       if (mode == OccupancyMode::Any) {
@@ -104,7 +156,7 @@ void Grid::rasterize(const std::vector<Vec3>& positions, const std::vector<int>*
         } else if (dist > anyRadius + 1e-9) {
           return;
         }
-        std::size_t idx = index(vx, vy, vz);
+        std::size_t idx = index(sx, sy, sz);
 #ifdef _OPENMP
 #pragma omp atomic write
 #endif
@@ -112,7 +164,7 @@ void Grid::rasterize(const std::vector<Vec3>& positions, const std::vector<int>*
       } else {
         if (allRadius <= 0.0) return;
         if (dist > allRadius - 1e-9) return;
-        std::size_t idx = index(vx, vy, vz);
+        std::size_t idx = index(sx, sy, sz);
 #ifdef _OPENMP
 #pragma omp atomic write
 #endif
@@ -121,10 +173,10 @@ void Grid::rasterize(const std::vector<Vec3>& positions, const std::vector<int>*
     };
 
     visit(ix, iy, iz, true);
-    if (reach > 0) {
-      for (int dx = -reach; dx <= reach; ++dx) {
-        for (int dy = -reach; dy <= reach; ++dy) {
-          for (int dz = -reach; dz <= reach; ++dz) {
+    if (reach[0] > 0 || reach[1] > 0 || reach[2] > 0) {
+      for (int dx = -reach[0]; dx <= reach[0]; ++dx) {
+        for (int dy = -reach[1]; dy <= reach[1]; ++dy) {
+          for (int dz = -reach[2]; dz <= reach[2]; ++dz) {
             if (dx == 0 && dy == 0 && dz == 0) continue;
             visit(ix + dx, iy + dy, iz + dz, false);
           }

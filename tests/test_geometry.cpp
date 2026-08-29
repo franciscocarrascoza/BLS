@@ -341,8 +341,12 @@ void testBoxGeometry(std::mt19937_64& rng) {
   std::uniform_int_distribution<int> shiftDist(-3, 3);
 
   for (const auto& bc : boxCases()) {
+    // Every property below is a statement about periodic wrapping, so the box
+    // must be declared periodic. Under BoxPeriodicity::NonPeriodic fractional()
+    // deliberately does not fold at all -- that half of the contract is checked
+    // separately at the end of this function.
     Grid g;
-    g.configure(12, 12, 12, 0.5, bc.box, bc.origin);
+    g.configure(12, 12, 12, 0.5, bc.box, bc.origin, bls::BoxPeriodicity::Periodic);
     const double boxScale = maxAbsEntry(bc.box) + bls::norm(bc.origin);
     const double tol = 1e-11 * std::max(1.0, boxScale);
 
@@ -428,6 +432,27 @@ void testBoxGeometry(std::mt19937_64& rng) {
     std::cout << "  " << bc.name << ": fwd " << worstFwd << ", rev " << worstRev << ", idem "
               << worstIdem << ", box-translation " << worstTrans << "\n";
   }
+
+  // The other half of the contract: a non-periodic box must NOT fold. A point
+  // three cells outside must report a fractional coordinate near 3, not near 0,
+  // so the stencil can clip it instead of stamping it onto the near face.
+  for (const auto& bc : boxCases()) {
+    Grid g;
+    g.configure(12, 12, 12, 0.5, bc.box, bc.origin, bls::BoxPeriodicity::NonPeriodic);
+    const double tol = 1e-11 * std::max(1.0, maxAbsEntry(bc.box) + bls::norm(bc.origin));
+    int foldFail = 0;
+    for (int i = 0; i < 500; ++i) {
+      Vec3 target{wide(rng), wide(rng), wide(rng)};
+      Vec3 frac = GridTestAccess::fractional(g, bc.origin + bc.box * target, nullptr);
+      if (std::max({std::abs(frac.x - target.x), std::abs(frac.y - target.y),
+                    std::abs(frac.z - target.z)}) > tol) {
+        ++foldFail;
+      }
+    }
+    check(foldFail == 0, bc.name + ": non-periodic box folded coordinates in " +
+                             std::to_string(foldFail) + "/500 cases");
+  }
+  std::cout << "  non-periodic boxes: no folding, 5 boxes x 500 out-of-cell points\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -580,56 +605,94 @@ void testTranslationInvariance(std::mt19937_64& rng) {
       {"triclinic(1,1.2,1.4,90,100,110)x20", referenceTriclinic() * 20.0},
   };
 
-  for (const auto& c : cases) {
-    const int n = 24;
-    Grid g;
-    g.configure(n, n, n, 1.0, c.box, Vec3{0, 0, 0});
+  // A one-voxel translation is a symmetry of a PERIODIC box only. Under a
+  // non-periodic box it is not, and must not be: the atom that leaves through
+  // the far face is genuinely gone. Both halves of that contract are checked.
+  for (int periodicIdx = 0; periodicIdx < 2; ++periodicIdx) {
+    const bool periodic = periodicIdx == 0;
+    const bls::BoxPeriodicity mode =
+        periodic ? bls::BoxPeriodicity::Periodic : bls::BoxPeriodicity::NonPeriodic;
 
-    // Atoms spread over the whole cell, so the test exercises the boundary
-    // rather than avoiding it.
-    std::vector<Vec3> atoms;
-    for (int i = 0; i < 200; ++i) {
-      atoms.push_back(cartesian(g, Vec3{unit(rng), unit(rng), unit(rng)}));
-    }
+    for (const auto& c : cases) {
+      const int n = 24;
+      Grid g;
+      g.configure(n, n, n, 1.0, c.box, Vec3{0, 0, 0}, mode);
 
-    for (int axis = 0; axis < 3; ++axis) {
-      const Vec3 cellVec = c.box.column(axis) / double(n);
-      for (double R : {0.0, 2.0}) {
-        g.rasterize(atoms, nullptr, R, OccupancyMode::Any);
-        std::vector<uint8_t> before = g.occupancy();
+      // Atoms spread over the whole cell, so the test exercises the boundary
+      // rather than avoiding it. For the non-periodic case a second set is
+      // held clear of every face, where the translation IS a symmetry.
+      std::vector<Vec3> everywhere, interior;
+      for (int i = 0; i < 200; ++i) {
+        everywhere.push_back(cartesian(g, Vec3{unit(rng), unit(rng), unit(rng)}));
+      }
+      std::uniform_real_distribution<double> inner(0.3, 0.7);
+      for (int i = 0; i < 200; ++i) {
+        interior.push_back(cartesian(g, Vec3{inner(rng), inner(rng), inner(rng)}));
+      }
+      const std::vector<Vec3>& atoms = periodic ? everywhere : interior;
 
-        std::vector<Vec3> shifted;
-        shifted.reserve(atoms.size());
-        for (const auto& a : atoms) shifted.push_back(a + cellVec);
-        g.rasterize(shifted, nullptr, R, OccupancyMode::Any);
-        const std::vector<uint8_t>& after = g.occupancy();
+      for (int axis = 0; axis < 3; ++axis) {
+        const Vec3 cellVec = c.box.column(axis) / double(n);
+        for (double R : {0.0, 2.0}) {
+          g.rasterize(atoms, nullptr, R, OccupancyMode::Any);
+          std::vector<uint8_t> before = g.occupancy();
 
-        std::size_t mismatches = 0;
-        for (int ix = 0; ix < n; ++ix) {
-          for (int iy = 0; iy < n; ++iy) {
-            for (int iz = 0; iz < n; ++iz) {
-              int jx = ix, jy = iy, jz = iz;
-              if (axis == 0) jx = (ix + 1) % n;
-              if (axis == 1) jy = (iy + 1) % n;
-              if (axis == 2) jz = (iz + 1) % n;
-              if (before[GridTestAccess::index(g, ix, iy, iz)] !=
-                  after[GridTestAccess::index(g, jx, jy, jz)]) {
-                ++mismatches;
+          std::vector<Vec3> shifted;
+          shifted.reserve(atoms.size());
+          for (const auto& a : atoms) shifted.push_back(a + cellVec);
+          g.rasterize(shifted, nullptr, R, OccupancyMode::Any);
+          const std::vector<uint8_t>& after = g.occupancy();
+
+          std::size_t mismatches = 0;
+          for (int ix = 0; ix < n; ++ix) {
+            for (int iy = 0; iy < n; ++iy) {
+              for (int iz = 0; iz < n; ++iz) {
+                int jx = ix, jy = iy, jz = iz;
+                if (axis == 0) jx = (ix + 1) % n;
+                if (axis == 1) jy = (iy + 1) % n;
+                if (axis == 2) jz = (iz + 1) % n;
+                if (before[GridTestAccess::index(g, ix, iy, iz)] !=
+                    after[GridTestAccess::index(g, jx, jy, jz)]) {
+                  ++mismatches;
+                }
               }
             }
           }
+          const std::string tag = std::string(periodic ? "periodic " : "non-periodic ") + c.name +
+                                  " axis=" + std::to_string(axis) + " R=" + std::to_string(R);
+          check(mismatches == 0, tag + ": occupancy not invariant under a one-voxel translation (" +
+                                     std::to_string(mismatches) + " voxels differ)");
+          if (mismatches != 0) {
+            std::cout << "  " << tag << ": " << mismatches << " mismatching voxels\n";
+          }
         }
-        const std::string tag =
-            c.name + " axis=" + std::to_string(axis) + " R=" + std::to_string(R);
-        check(mismatches == 0, tag + ": occupancy not invariant under a one-voxel translation (" +
-                                   std::to_string(mismatches) + " voxels differ)");
-        if (mismatches != 0) {
-          std::cout << "  " << tag << ": " << mismatches << " mismatching voxels\n";
-        }
+      }
+
+      // The converse, for the non-periodic box: with atoms right up against
+      // the faces the translation must NOT be a symmetry. If this ever passes,
+      // the box has silently become periodic again.
+      if (!periodic) {
+        const Vec3 cellVec = c.box.column(0) / double(n);
+        g.rasterize(everywhere, nullptr, 2.0, OccupancyMode::Any);
+        std::vector<uint8_t> before = g.occupancy();
+        std::vector<Vec3> shifted;
+        for (const auto& a : everywhere) shifted.push_back(a + cellVec);
+        g.rasterize(shifted, nullptr, 2.0, OccupancyMode::Any);
+        const std::vector<uint8_t>& after = g.occupancy();
+        std::size_t mismatches = 0;
+        for (int ix = 0; ix < n; ++ix)
+          for (int iy = 0; iy < n; ++iy)
+            for (int iz = 0; iz < n; ++iz)
+              if (before[GridTestAccess::index(g, ix, iy, iz)] !=
+                  after[GridTestAccess::index(g, (ix + 1) % n, iy, iz)])
+                ++mismatches;
+        check(mismatches > 0, "non-periodic " + c.name +
+                                  ": boundary-spanning atoms wrapped anyway (the clip/wrap split "
+                                  "has regressed)");
       }
     }
   }
-  std::cout << "  one-voxel translation invariance: checked 2 boxes x 3 axes x 2 radii\n";
+  std::cout << "  one-voxel translation invariance: 2 periodicities x 2 boxes x 3 axes x 2 radii\n";
 }
 
 }  // namespace

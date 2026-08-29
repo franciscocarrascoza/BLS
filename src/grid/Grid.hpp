@@ -11,7 +11,8 @@ namespace bls {
 
 class Grid {
  public:
-  void configure(int nx, int ny, int nz, double spacing, const Mat3& box, const Vec3& origin);
+  void configure(int nx, int ny, int nz, double spacing, const Mat3& box, const Vec3& origin,
+                 BoxPeriodicity periodicity = BoxPeriodicity::NonPeriodic);
 
   void reset();
 
@@ -33,6 +34,7 @@ class Grid {
 
   const Mat3& box() const { return box_; }
   const Vec3& origin() const { return origin_; }
+  BoxPeriodicity periodicity() const { return periodicity_; }
 
  private:
   // Grants tests/test_geometry.cpp access to the geometry primitives below.
@@ -55,8 +57,14 @@ class Grid {
   Vec3 cellVecX_{0.0, 0.0, 0.0};
   Vec3 cellVecY_{0.0, 0.0, 0.0};
   Vec3 cellVecZ_{0.0, 0.0, 0.0};
-  double maxEdgeLength_{1.0};
   double maxCornerDistance_{0.0};
+  BoxPeriodicity periodicity_{BoxPeriodicity::NonPeriodic};
+
+  // norm of row k of the inverse voxel-cell matrix, i.e. the factor that
+  // converts a Cartesian distance into the largest displacement it can produce
+  // along lattice index k. Used to size the neighbour stencil per axis; see
+  // Grid::configure.
+  double indexReachPerLength_[3]{0.0, 0.0, 0.0};
 
   std::vector<uint8_t> occ_;
   std::vector<uint8_t> visited_;

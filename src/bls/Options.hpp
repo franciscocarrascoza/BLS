@@ -51,6 +51,37 @@ struct AtomSelection {
 
 enum class BoxMode { Auto, Manual };
 
+// Whether the analysis box is to be treated as a periodic cell.
+//
+// This has to be explicit because the two halves of Grid::rasterize used to
+// disagree about it: Grid::fractional wrapped atom positions with floor()
+// (periodic) while the neighbour stencil clipped out-of-range voxel indices
+// (non-periodic). An atom near a face therefore had its position folded into
+// the cell but only half its footprint stamped. Both halves now read this
+// flag, so a box is periodic in both or neither.
+//
+// NonPeriodic is right for a box the analyser synthesised itself: BLS.cpp
+// builds a bounding box around the atoms with 2*GRID_SPACING of padding when
+// the trajectory carries no usable cell, and wrapping that would connect
+// opposite faces across vacuum. Periodic is right for a genuine MD cell.
+enum class BoxPeriodicity { NonPeriodic, Periodic };
+
+// Single place where the periodicity of the analysis box is decided, used by
+// both box-derivation sites (bls/BLS.cpp and main.cpp).
+//
+// CAVEAT, deliberate and worth knowing before changing this: BOX AUTO does not
+// always mean a synthesised bounding box. It uses the trajectory's own cell
+// whenever that cell is usable, and only falls back to a bounding box when the
+// cell is missing, degenerate, or implausibly large. So a genuine periodic MD
+// cell arriving through a CRYST1 record is treated as non-periodic here. That
+// costs nothing today -- no clustering algorithm in this codebase has any
+// periodic-boundary handling at all, and in every E0-E5 system every atom lies
+// strictly inside its cell, so no wrap would fire even if it were enabled --
+// but it is the line to revisit if periodic connectivity is ever added.
+inline BoxPeriodicity periodicityForBoxMode(BoxMode mode) {
+  return mode == BoxMode::Manual ? BoxPeriodicity::Periodic : BoxPeriodicity::NonPeriodic;
+}
+
 struct ManualBox {
   double xlo{0.0}, xhi{0.0};
   double ylo{0.0}, yhi{0.0};

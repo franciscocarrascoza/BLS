@@ -516,7 +516,8 @@ int main(int argc, char** argv) {
       }
 
       Grid grid;
-      grid.configure(nx, ny, nz, config.gridSpacing, activeBox, origin);
+      grid.configure(nx, ny, nz, config.gridSpacing, activeBox, origin,
+                     periodicityForBoxMode(config.boxMode));
       const std::vector<int>* selPtr = selection.empty() ? nullptr : &selection;
       grid.rasterize(current.xyz, selPtr, config.cutoff, config.occupancy);
 
