@@ -18,7 +18,10 @@ enum class ClusterAlgorithm {
   GCBD,          // Union-Find based clustering
   HDBSCAN,       // Hierarchical DBSCAN
   CC3D,          // Connected Components 3D (fair: basic Union-Find)
-  CC3DOptimized  // Connected Components 3D (optimized: path compression + union-by-rank)
+  CC3DOptimized, // Connected Components 3D (optimized: path compression + union-by-rank)
+  RLECCL,        // Run-Length Encoding CCL (sparse-aware, Category 2a)
+  OctreeCCL,     // Octree-based CCL (hierarchical, skips empty octants, Category 2a)
+  VCCS           // Voxel Cloud Connected Segmentation (uniform-grid seeding, Category 2e)
 };
 
 // Convert string to algorithm enum
@@ -130,6 +133,35 @@ ClusterResult cc3d(
 ClusterResult cc3dOptimized(
     int nx, int ny, int nz,
     int connectivity,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// RLE-based CCL - Run-Length Encoding Connected Component Labeling
+// Encodes consecutive occupied voxels as runs; merges adjacent runs via union-find.
+// Sparse-aware: complexity scales with number of runs, not grid volume.
+ClusterResult rleCCL(
+    int nx, int ny, int nz,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// Octree-based CCL - Hierarchical grid subdivision
+// Recursively skips empty octants; runs local connectivity at leaves.
+// Shares BLS's "skip empty space" philosophy via a different strategy.
+// leafSize: stop subdividing when all dimensions <= leafSize (default: 8)
+ClusterResult octreeCCL(
+    int nx, int ny, int nz,
+    int leafSize,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// VCCS - Voxel Cloud Connected Segmentation
+// Places seeds on a uniform 3D grid (spacing = seedResolution voxels) then
+// expands regions outward via BFS ordered by distance to seed.
+// Structurally closest to BLS (seed + expand), but uses uniform rather than
+// crystallographic seeding — does NOT guarantee topological correctness.
+ClusterResult vccs(
+    int nx, int ny, int nz,
+    double seedResolution,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited);
 

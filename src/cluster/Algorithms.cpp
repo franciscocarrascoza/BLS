@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <queue>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "cluster/UnionFindBasic.hpp"
@@ -58,6 +61,9 @@ ClusterAlgorithm parseAlgorithm(const std::string& name) {
   if (lower == "hdbscan") return ClusterAlgorithm::HDBSCAN;
   if (lower == "cc3d" || lower == "cc3d_basic") return ClusterAlgorithm::CC3D;
   if (lower == "cc3d_optimized" || lower == "cc3d_opt") return ClusterAlgorithm::CC3DOptimized;
+  if (lower == "rle_ccl" || lower == "rleccl" || lower == "rle") return ClusterAlgorithm::RLECCL;
+  if (lower == "octree_ccl" || lower == "octreeccl" || lower == "octree") return ClusterAlgorithm::OctreeCCL;
+  if (lower == "vccs") return ClusterAlgorithm::VCCS;
 
   throw std::runtime_error("Unknown clustering algorithm: " + name);
 }
@@ -75,13 +81,17 @@ std::string algorithmToString(ClusterAlgorithm algo) {
     case ClusterAlgorithm::HDBSCAN: return "hdbscan";
     case ClusterAlgorithm::CC3D: return "cc3d";
     case ClusterAlgorithm::CC3DOptimized: return "cc3d_optimized";
+    case ClusterAlgorithm::RLECCL: return "rle_ccl";
+    case ClusterAlgorithm::OctreeCCL: return "octree_ccl";
+    case ClusterAlgorithm::VCCS: return "vccs";
   }
   return "unknown";
 }
 
 std::vector<std::string> listAlgorithms() {
   return {"bls", "traditional_dfs", "skip_dfs", "dbscan",
-          "hierarchical", "kmeans", "spectral", "gcbd", "hdbscan", "cc3d", "cc3d_optimized"};
+          "hierarchical", "kmeans", "spectral", "gcbd", "hdbscan",
+          "cc3d", "cc3d_optimized", "rle_ccl", "octree_ccl", "vccs"};
 }
 
 ClusterResult runClusterAlgorithm(
@@ -115,6 +125,15 @@ ClusterResult runClusterAlgorithm(
       return cc3d(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited);
     case ClusterAlgorithm::CC3DOptimized:
       return cc3dOptimized(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited);
+    case ClusterAlgorithm::RLECCL:
+      return rleCCL(params.nx, params.ny, params.nz, occupancy, visited);
+    case ClusterAlgorithm::OctreeCCL:
+      // Use params.skip as leaf size (default 8 voxels per side for good balance)
+      return octreeCCL(params.nx, params.ny, params.nz,
+                       params.skip > 0 ? params.skip : 8, occupancy, visited);
+    case ClusterAlgorithm::VCCS:
+      // Use params.eps as seed spacing in voxels (default 3.0)
+      return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
   }
   throw std::runtime_error("Unhandled algorithm type");
 }
@@ -227,15 +246,46 @@ ClusterResult skipDFS(
         clusterSize++;
         result.visitedVoxels++;
 
-        const int (*currentDeltas)[3] = isSkipping && occupancy[index] ? skipDeltas : deltas6;
-
-        for (int d = 0; d < 6; ++d) {
-          int ni = i + currentDeltas[d][0];
-          int nj = j + currentDeltas[d][1];
-          int nk = k + currentDeltas[d][2];
-          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
-            std::size_t nIndex = idx3(ni, nj, nk, ny, nz);
-            stack.push_back({ni, nj, nk, occupancy[nIndex] == 1 ? 1 : 0});
+        if (isSkipping) {
+          // Skip-mode: jump 'skip' voxels ahead in each axis direction.
+          // Also enqueue all intermediate voxels so they are visited and
+          // not mistakenly treated as new cluster seeds by the outer loop.
+          for (int d = 0; d < 6; ++d) {
+            const int di = skipDeltas[d][0];
+            const int dj = skipDeltas[d][1];
+            const int dk = skipDeltas[d][2];
+            // Unit step along the skip direction (±1 per axis)
+            const int step_i = di / skip;
+            const int step_j = dj / skip;
+            const int step_k = dk / skip;
+            // Enqueue intermediate voxels with no-skip flag
+            for (int step = 1; step < skip; ++step) {
+              int ii = i + step_i * step;
+              int jj = j + step_j * step;
+              int kk = k + step_k * step;
+              if (ii >= 0 && ii < nx && jj >= 0 && jj < ny && kk >= 0 && kk < nz) {
+                stack.push_back({ii, jj, kk, 0});
+              }
+            }
+            // Enqueue the skip-target
+            int ni = i + di;
+            int nj = j + dj;
+            int nk = k + dk;
+            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+              std::size_t nIndex = idx3(ni, nj, nk, ny, nz);
+              stack.push_back({ni, nj, nk, occupancy[nIndex] == 1 ? 1 : 0});
+            }
+          }
+        } else {
+          // Normal 6-connectivity exploration
+          for (int d = 0; d < 6; ++d) {
+            int ni = i + deltas6[d][0];
+            int nj = j + deltas6[d][1];
+            int nk = k + deltas6[d][2];
+            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+              std::size_t nIndex = idx3(ni, nj, nk, ny, nz);
+              stack.push_back({ni, nj, nk, occupancy[nIndex] == 1 ? 1 : 0});
+            }
           }
         }
       }
@@ -1114,6 +1164,528 @@ ClusterResult cc3dOptimized(
       result.nclusters++;
       result.clusterSizes.push_back(clusterSizeMap[i]);
       result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+// ── RLE-based CCL ────────────────────────────────────────────────────────────
+//
+// Run-Length Encoding Connected Component Labeling.
+// For each row (i,j), consecutive occupied voxels along k form "runs".
+// Adjacent rows / adjacent slices with overlapping run extents are merged
+// via union-find on the global voxel index.
+//
+// Complexity: O(R * max_runs_per_row) where R = number of occupied runs.
+// For sparse grids R << NX*NY*NZ, making this faster than full-grid scan.
+//
+// Reference: He et al., "A Run-Based Two-Scan Labeling Algorithm",
+//            IEEE Trans. Image Processing 17(5), 2008.
+
+ClusterResult rleCCL(
+    int nx, int ny, int nz,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  std::fill(visited.begin(), visited.end(), 0);
+
+  // Global union-find over voxel indices (path-halving + union-by-rank)
+  std::vector<int> parent(totalSize);
+  std::vector<int> ufRank(totalSize, 0);
+  for (std::size_t i = 0; i < totalSize; ++i) parent[i] = static_cast<int>(i);
+
+  auto find = [&](int x) -> int {
+    while (parent[x] != x) {
+      parent[x] = parent[parent[x]];  // path halving
+      x = parent[x];
+    }
+    return x;
+  };
+
+  auto unite = [&](int a, int b) {
+    a = find(a); b = find(b);
+    if (a == b) return;
+    if (ufRank[a] < ufRank[b]) std::swap(a, b);
+    parent[b] = a;
+    if (ufRank[a] == ufRank[b]) ufRank[a]++;
+  };
+
+  // A run encodes a maximal consecutive sequence of occupied voxels
+  // in the k-direction for a given (i,j).
+  struct Run {
+    int kStart;   // inclusive
+    int kEnd;     // inclusive
+    int repIdx;   // global voxel index of the first voxel in the run
+  };
+
+  // We keep two slices worth of runs for inter-slice merging.
+  // prevSliceRuns[j] = runs from slice (i-1) at row j.
+  // currSliceRuns[j] = runs from slice i at row j.
+  std::vector<std::vector<Run>> prevSliceRuns(ny);
+  std::vector<std::vector<Run>> currSliceRuns(ny);
+
+  // Merge two sorted run-lists from adjacent rows/slices.
+  // Two runs overlap in k if their k-ranges share at least one position.
+  auto mergeRunLists = [&](const std::vector<Run>& A,
+                            const std::vector<Run>& B) {
+    std::size_t ai = 0, bi = 0;
+    while (ai < A.size() && bi < B.size()) {
+      const Run& ra = A[ai];
+      const Run& rb = B[bi];
+      if (ra.kEnd < rb.kStart) { ++ai; continue; }
+      if (rb.kEnd < ra.kStart) { ++bi; continue; }
+      // Overlap detected
+      unite(ra.repIdx, rb.repIdx);
+      // Advance the run that ends earlier; the other may still overlap
+      if (ra.kEnd <= rb.kEnd) ++ai;
+      else                    ++bi;
+    }
+  };
+
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      currSliceRuns[j].clear();
+
+      // Scan row (i,j) along k: collect runs and union voxels within each run
+      int kStart = -1;
+      int repIdx = -1;
+
+      for (int k = 0; k <= nz; ++k) {
+        bool occ = (k < nz) && (occupancy[idx3(i, j, k, ny, nz)] == 1);
+        if (occ) {
+          int vIdx = static_cast<int>(idx3(i, j, k, ny, nz));
+          if (kStart < 0) {
+            // Start a new run
+            kStart = k;
+            repIdx = vIdx;
+          } else {
+            // Extend existing run: connect this voxel to the run's representative
+            unite(repIdx, vIdx);
+          }
+        } else {
+          if (kStart >= 0) {
+            // Close the run
+            currSliceRuns[j].push_back({kStart, k - 1, find(repIdx)});
+            kStart = -1;
+            repIdx = -1;
+          }
+        }
+      }
+
+      // Merge with previous row in same slice (j-1 same i)
+      if (j > 0 && !currSliceRuns[j - 1].empty()) {
+        mergeRunLists(currSliceRuns[j - 1], currSliceRuns[j]);
+      }
+
+      // Merge with corresponding row in previous slice (i-1, same j)
+      if (i > 0 && !prevSliceRuns[j].empty()) {
+        mergeRunLists(prevSliceRuns[j], currSliceRuns[j]);
+      }
+    }
+
+    // Move current slice runs to previous for next slice iteration
+    std::swap(prevSliceRuns, currSliceRuns);
+  }
+
+  // Final pass: count clusters
+  std::vector<int> clusterSizeMap(totalSize, 0);
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] == 1) {
+          int root = find(static_cast<int>(idx));
+          clusterSizeMap[root]++;
+          visited[idx] = 1;
+          result.visitedVoxels++;
+        }
+      }
+    }
+  }
+
+  for (std::size_t i = 0; i < totalSize; ++i) {
+    if (clusterSizeMap[i] > 0) {
+      result.nclusters++;
+      result.clusterSizes.push_back(clusterSizeMap[i]);
+      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+
+// ── Octree-based CCL ─────────────────────────────────────────────────────────
+//
+// Hierarchical 3D grid subdivision.
+// Empty octants are detected early and skipped entirely (O(1) per empty octant).
+// At leaf level, local 6-connectivity is resolved via union-find.
+// After each recursive split, cross-boundary connections at the three midplanes
+// are added by scanning the shared face rows.
+//
+// Shares BLS's "skip empty space" philosophy, but uses a different strategy:
+// crystallographic lattice (BLS) vs. regular octree subdivision (here).
+
+namespace {
+
+// Forward declaration of octree recursive helper
+static void octreeRecurse(
+    int nx, int ny, int nz,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<int>& parent,
+    std::vector<int>& ufRank,
+    int leafSize,
+    int x0, int y0, int z0,
+    int x1, int y1, int z1);
+
+static int octreeFind(std::vector<int>& parent, int x) {
+  while (parent[x] != x) {
+    parent[x] = parent[parent[x]];
+    x = parent[x];
+  }
+  return x;
+}
+
+static void octreeUnite(std::vector<int>& parent, std::vector<int>& ufRank,
+                         int a, int b) {
+  a = octreeFind(parent, a);
+  b = octreeFind(parent, b);
+  if (a == b) return;
+  if (ufRank[a] < ufRank[b]) std::swap(a, b);
+  parent[b] = a;
+  if (ufRank[a] == ufRank[b]) ufRank[a]++;
+}
+
+static void octreeRecurse(
+    int nx, int ny, int nz,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<int>& parent,
+    std::vector<int>& ufRank,
+    int leafSize,
+    int x0, int y0, int z0,
+    int x1, int y1, int z1) {
+
+  int dx = x1 - x0;
+  int dy = y1 - y0;
+  int dz = z1 - z0;
+  if (dx <= 0 || dy <= 0 || dz <= 0) return;
+
+  // Early termination: check if octant contains any occupied voxel
+  bool hasOccupied = false;
+  for (int i = x0; i < x1 && !hasOccupied; ++i)
+    for (int j = y0; j < y1 && !hasOccupied; ++j)
+      for (int k = z0; k < z1 && !hasOccupied; ++k)
+        if (occupancy[idx3(i, j, k, ny, nz)] == 1) hasOccupied = true;
+
+  if (!hasOccupied) return;
+
+  // Leaf: connect all 6-neighbors within this sub-cube
+  if (dx <= leafSize && dy <= leafSize && dz <= leafSize) {
+    for (int i = x0; i < x1; ++i)
+      for (int j = y0; j < y1; ++j)
+        for (int k = z0; k < z1; ++k) {
+          std::size_t idx = idx3(i, j, k, ny, nz);
+          if (occupancy[idx] != 1) continue;
+          for (int d = 0; d < 6; ++d) {
+            int ni = i + deltas6[d][0];
+            int nj = j + deltas6[d][1];
+            int nk = k + deltas6[d][2];
+            // Only connect within this leaf's bounds
+            if (ni >= x0 && ni < x1 && nj >= y0 && nj < y1 && nk >= z0 && nk < z1) {
+              std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
+              if (occupancy[nIdx] == 1)
+                octreeUnite(parent, ufRank, static_cast<int>(idx),
+                             static_cast<int>(nIdx));
+            }
+          }
+        }
+    return;
+  }
+
+  // Split into up to 8 octants at the midpoint of each dimension
+  int mx = (dx > 1) ? (x0 + x1) / 2 : x1;
+  int my = (dy > 1) ? (y0 + y1) / 2 : y1;
+  int mz = (dz > 1) ? (z0 + z1) / 2 : z1;
+
+  // Recurse into 8 children (some may be empty — handled by hasOccupied check above)
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, y0, z0, mx, my, mz);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, y0, mz, mx, my, z1);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, my, z0, mx, y1, mz);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, my, mz, mx, y1, z1);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, y0, z0, x1, my, mz);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, y0, mz, x1, my, z1);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, my, z0, x1, y1, mz);
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, my, mz, x1, y1, z1);
+
+  // Merge across X midplane (mx-1 | mx)
+  if (mx > x0 && mx < x1) {
+    for (int j = y0; j < y1; ++j)
+      for (int k = z0; k < z1; ++k) {
+        std::size_t i1 = idx3(mx - 1, j, k, ny, nz);
+        std::size_t i2 = idx3(mx,     j, k, ny, nz);
+        if (occupancy[i1] == 1 && occupancy[i2] == 1)
+          octreeUnite(parent, ufRank, static_cast<int>(i1), static_cast<int>(i2));
+      }
+  }
+
+  // Merge across Y midplane (my-1 | my)
+  if (my > y0 && my < y1) {
+    for (int i = x0; i < x1; ++i)
+      for (int k = z0; k < z1; ++k) {
+        std::size_t i1 = idx3(i, my - 1, k, ny, nz);
+        std::size_t i2 = idx3(i, my,     k, ny, nz);
+        if (occupancy[i1] == 1 && occupancy[i2] == 1)
+          octreeUnite(parent, ufRank, static_cast<int>(i1), static_cast<int>(i2));
+      }
+  }
+
+  // Merge across Z midplane (mz-1 | mz)
+  if (mz > z0 && mz < z1) {
+    for (int i = x0; i < x1; ++i)
+      for (int j = y0; j < y1; ++j) {
+        std::size_t i1 = idx3(i, j, mz - 1, ny, nz);
+        std::size_t i2 = idx3(i, j, mz,     ny, nz);
+        if (occupancy[i1] == 1 && occupancy[i2] == 1)
+          octreeUnite(parent, ufRank, static_cast<int>(i1), static_cast<int>(i2));
+      }
+  }
+}
+
+}  // anonymous namespace (extended)
+
+ClusterResult octreeCCL(
+    int nx, int ny, int nz,
+    int leafSize,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  std::fill(visited.begin(), visited.end(), 0);
+
+  if (leafSize <= 0) leafSize = 8;
+
+  std::vector<int> parent(totalSize);
+  std::vector<int> ufRank(totalSize, 0);
+  for (std::size_t i = 0; i < totalSize; ++i) parent[i] = static_cast<int>(i);
+
+  // Recursive octree processing
+  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize,
+                0, 0, 0, nx, ny, nz);
+
+  // Count clusters
+  std::vector<int> clusterSizeMap(totalSize, 0);
+  for (int i = 0; i < nx; ++i)
+    for (int j = 0; j < ny; ++j)
+      for (int k = 0; k < nz; ++k) {
+        std::size_t idx = idx3(i, j, k, ny, nz);
+        if (occupancy[idx] == 1) {
+          int root = octreeFind(parent, static_cast<int>(idx));
+          clusterSizeMap[root]++;
+          visited[idx] = 1;
+          result.visitedVoxels++;
+        }
+      }
+
+  for (std::size_t i = 0; i < totalSize; ++i) {
+    if (clusterSizeMap[i] > 0) {
+      result.nclusters++;
+      result.clusterSizes.push_back(clusterSizeMap[i]);
+      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+
+// ── VCCS — Voxel Cloud Connected Segmentation ─────────────────────────────────
+//
+// Places seed voxels on a uniform 3D lattice (spacing = seedResolution voxels).
+// Expands regions from seeds via a Dijkstra-like BFS ordered by Euclidean
+// distance to the seed origin. The result is a Voronoi partition of occupied
+// voxels anchored at the seed positions.
+//
+// Key distinction from BLS:
+//   - VCCS uses uniform grid seeding → many seeds land in empty space (wasted).
+//   - BLS uses crystallographic lattice seeding aligned to the physical structure.
+//   - VCCS does NOT guarantee topological correctness: two disconnected but
+//     spatially close regions can be assigned to the same supervoxel.
+//
+// Parameter: seedResolution (--algo-eps, default 3.0 voxels) = seed spacing.
+
+ClusterResult vccs(
+    int nx, int ny, int nz,
+    double seedResolution,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  std::fill(visited.begin(), visited.end(), 0);
+
+  int S = std::max(1, static_cast<int>(std::round(seedResolution)));
+
+  // assignment[idx] = cluster id (or -1 = unassigned)
+  std::vector<int> assignment(totalSize, -1);
+
+  // Priority queue: (dist_to_seed, voxel_idx, cluster_id, seed_i, seed_j, seed_k)
+  // Ordered by ascending distance so nearest-seed claims each voxel first.
+  struct PQEntry {
+    double dist;
+    int idx;
+    int clusterId;
+    int si, sj, sk;
+    bool operator>(const PQEntry& o) const { return dist > o.dist; }
+  };
+  std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<PQEntry>> pq;
+
+  int clusterId = 0;
+
+  // Place seeds on a regular 3D grid.
+  // Offset by S/2 so seeds are centred within their cells.
+  int halfS = S / 2;
+  for (int si = halfS; si < nx; si += S) {
+    for (int sj = halfS; sj < ny; sj += S) {
+      for (int sk = halfS; sk < nz; sk += S) {
+        std::size_t seedIdx = idx3(si, sj, sk, ny, nz);
+        if (occupancy[seedIdx] == 1 && assignment[seedIdx] == -1) {
+          // Start a new cluster from this seed
+          assignment[seedIdx] = clusterId;
+          visited[seedIdx] = 1;
+          result.visitedVoxels++;
+
+          // Push seed's 6-neighbours into the priority queue
+          for (int d = 0; d < 6; ++d) {
+            int ni = si + deltas6[d][0];
+            int nj = sj + deltas6[d][1];
+            int nk = sk + deltas6[d][2];
+            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+              std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
+              if (occupancy[nIdx] == 1 && assignment[nIdx] == -1) {
+                double dd = std::sqrt(static_cast<double>((ni - si) * (ni - si) +
+                                                           (nj - sj) * (nj - sj) +
+                                                           (nk - sk) * (nk - sk)));
+                pq.push({dd, static_cast<int>(nIdx), clusterId, si, sj, sk});
+              }
+            }
+          }
+          ++clusterId;
+        }
+      }
+    }
+  }
+
+  // BFS expansion: assign each unassigned occupied voxel to the nearest seed's cluster
+  while (!pq.empty()) {
+    PQEntry e = pq.top();
+    pq.pop();
+
+    if (assignment[e.idx] != -1) continue;  // already claimed
+    if (occupancy[e.idx] != 1) continue;     // sanity check
+
+    assignment[e.idx] = e.clusterId;
+    visited[e.idx] = 1;
+    result.visitedVoxels++;
+
+    // Decompose flat index back to (i,j,k)
+    int nynz = ny * nz;
+    int i0 = e.idx / nynz;
+    int rem = e.idx % nynz;
+    int j0 = rem / nz;
+    int k0 = rem % nz;
+
+    for (int d = 0; d < 6; ++d) {
+      int ni = i0 + deltas6[d][0];
+      int nj = j0 + deltas6[d][1];
+      int nk = k0 + deltas6[d][2];
+      if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+        std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
+        if (occupancy[nIdx] == 1 && assignment[nIdx] == -1) {
+          double dd = std::sqrt(static_cast<double>((ni - e.si) * (ni - e.si) +
+                                                     (nj - e.sj) * (nj - e.sj) +
+                                                     (nk - e.sk) * (nk - e.sk)));
+          pq.push({dd, static_cast<int>(nIdx), e.clusterId, e.si, e.sj, e.sk});
+        }
+      }
+    }
+  }
+
+  // Any occupied voxels not reached by any seed (seed grid misses them entirely)
+  // are assigned as new isolated clusters via simple DFS.
+  // This illustrates VCCS's coverage gap vs. BLS's lattice-guaranteed coverage.
+  std::vector<StackElement> stack;
+  stack.reserve(1000);
+  for (std::size_t flatIdx = 0; flatIdx < totalSize; ++flatIdx) {
+    if (occupancy[flatIdx] != 1 || assignment[flatIdx] != -1) continue;
+
+    // Start a new cluster from this unreached voxel
+    int i0 = static_cast<int>(flatIdx) / (ny * nz);
+    int rem = static_cast<int>(flatIdx) % (ny * nz);
+    int j0 = rem / nz;
+    int k0 = rem % nz;
+
+    stack.clear();
+    stack.push_back({i0, j0, k0, 0});
+    assignment[flatIdx] = clusterId;
+
+    while (!stack.empty()) {
+      StackElement curr = stack.back();
+      stack.pop_back();
+      std::size_t idx = idx3(curr.i, curr.j, curr.k, ny, nz);
+      if (assignment[idx] == clusterId) {
+        visited[idx] = 1;
+        result.visitedVoxels++;
+        for (int d = 0; d < 6; ++d) {
+          int ni = curr.i + deltas6[d][0];
+          int nj = curr.j + deltas6[d][1];
+          int nk = curr.k + deltas6[d][2];
+          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+            std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
+            if (occupancy[nIdx] == 1 && assignment[nIdx] == -1) {
+              assignment[nIdx] = clusterId;
+              stack.push_back({ni, nj, nk, 0});
+            }
+          }
+        }
+      }
+    }
+    ++clusterId;
+  }
+
+  // Tally cluster sizes
+  if (clusterId == 0) {
+    result.elapsedMs = timer.elapsedMilliseconds();
+    return result;
+  }
+
+  std::vector<int> clusterSizes(clusterId, 0);
+  for (std::size_t idx = 0; idx < totalSize; ++idx) {
+    if (occupancy[idx] == 1 && assignment[idx] >= 0) {
+      clusterSizes[assignment[idx]]++;
+    }
+  }
+
+  for (int c = 0; c < clusterId; ++c) {
+    if (clusterSizes[c] > 0) {
+      result.nclusters++;
+      result.clusterSizes.push_back(clusterSizes[c]);
+      result.maxCluster = std::max(result.maxCluster, clusterSizes[c]);
     }
   }
 

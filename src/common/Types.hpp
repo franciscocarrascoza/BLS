@@ -122,15 +122,28 @@ inline double determinant(const Mat3& m) {
   return dot(m.cols[0], cross(m.cols[1], m.cols[2]));
 }
 
+// Cofactor inverse. Mat3 stores COLUMNS, so note the transposition below:
+// cross(col1,col2), cross(col2,col0), cross(col0,col1) divided by the
+// determinant are the ROWS of the inverse, not its columns. Returning them
+// as columns yields inverse(m)^T, which is silently correct for any
+// symmetric m -- including every cubic basis and every orthorhombic box --
+// and wrong for everything else. That was the bug up to 2026-08-29: it
+// corrupted the enumerator's lattice-index bounding box for hexagonal and
+// triclinic bases (~26% of sites never generated) and Grid::fractional's
+// PBC wrapping for non-orthogonal simulation boxes.
 inline Mat3 inverse(const Mat3& m) {
-  Vec3 c0 = cross(m.cols[1], m.cols[2]);
-  Vec3 c1 = cross(m.cols[2], m.cols[0]);
-  Vec3 c2 = cross(m.cols[0], m.cols[1]);
-  double det = dot(m.cols[0], c0);
+  Vec3 r0 = cross(m.cols[1], m.cols[2]);
+  Vec3 r1 = cross(m.cols[2], m.cols[0]);
+  Vec3 r2 = cross(m.cols[0], m.cols[1]);
+  double det = dot(m.cols[0], r0);
   if (std::abs(det) < 1e-12) {
     throw std::runtime_error("Singular matrix inversion request");
   }
-  return Mat3{c0 / det, c1 / det, c2 / det};
+  // Divide (rather than multiply by a precomputed 1/det) to keep the rounding
+  // bit-for-bit identical to the pre-fix code on symmetric inputs.
+  return Mat3{Vec3{r0.x, r1.x, r2.x} / det,   // column 0 of the inverse
+              Vec3{r0.y, r1.y, r2.y} / det,   // column 1
+              Vec3{r0.z, r1.z, r2.z} / det};  // column 2
 }
 
 inline std::ostream& operator<<(std::ostream& os, const Vec3& v) {

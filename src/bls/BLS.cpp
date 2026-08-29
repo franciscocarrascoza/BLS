@@ -222,7 +222,8 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
 
   impl_->grid.rasterize(frame.xyz, selectionPtr, config_.cutoff, config_.occupancy);
 
-  Enumerator enumerator(impl_->scaledBasis, impl_->lattice.offsets, nx, ny, nz);
+  Enumerator enumerator(impl_->scaledBasis, impl_->lattice.offsets, nx, ny, nz,
+                        impl_->grid.occupancy());
 
   SkipDFSConfig skipCfg{nx, ny, nz, config_.connectivity, config_.skip};
   SkipDFS dfs(skipCfg, impl_->grid.occupancy(), impl_->grid.visited());
