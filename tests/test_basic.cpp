@@ -104,14 +104,38 @@ int main() {
   }
 
   // PBC wrapping test.
+  //
+  // This test used to place atoms at x = -0.1 AND x = 3.9 and assert only that
+  // voxel 3 ended up occupied. Both atoms land in voxel 3 -- the second one
+  // without any wrapping at all -- so the assertion held whether or not
+  // wrapping worked, and it kept holding after wrapping was made conditional
+  // on BoxPeriodicity. The out-of-box atom is now tested on its own, and the
+  // non-periodic case is tested for the opposite outcome.
   {
-    Grid grid;
-    grid.configure(4, 1, 1, 1.0, Mat3{Vec3{4, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}},
-                   Vec3{0, 0, 0});
-    std::vector<Vec3> positions = {Vec3{-0.1, 0.0, 0.0}, Vec3{3.9, 0.0, 0.0}};
-    grid.rasterize(positions, nullptr, 0.0, bls::OccupancyMode::Any);
-    const auto& occ = grid.occupancy();
-    check(occ[gridIndex(3, 0, 0, 1, 1)] == 1, "PBC wrapping failed to map atoms into box");
+    const Mat3 box{Vec3{4, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}};
+    const std::vector<Vec3> outside = {Vec3{-0.1, 0.0, 0.0}};
+
+    Grid periodic;
+    periodic.configure(4, 1, 1, 1.0, box, Vec3{0, 0, 0}, bls::BoxPeriodicity::Periodic);
+    periodic.rasterize(outside, nullptr, 0.0, bls::OccupancyMode::Any);
+    check(periodic.occupancy()[gridIndex(3, 0, 0, 1, 1)] == 1,
+          "PBC wrapping failed to map an out-of-box atom into the far voxel");
+
+    Grid nonPeriodic;
+    nonPeriodic.configure(4, 1, 1, 1.0, box, Vec3{0, 0, 0}, bls::BoxPeriodicity::NonPeriodic);
+    nonPeriodic.rasterize(outside, nullptr, 0.0, bls::OccupancyMode::Any);
+    std::size_t occupiedCount = 0;
+    for (uint8_t v : nonPeriodic.occupancy())
+      if (v) ++occupiedCount;
+    check(occupiedCount == 0,
+          "A non-periodic box must drop an out-of-box atom, not fold it onto a face");
+
+    // An in-box atom is unaffected by either setting.
+    for (Grid* g : {&periodic, &nonPeriodic}) {
+      g->rasterize({Vec3{3.9, 0.0, 0.0}}, nullptr, 0.0, bls::OccupancyMode::Any);
+      check(g->occupancy()[gridIndex(3, 0, 0, 1, 1)] == 1,
+            "In-box atom was not rasterised into its own voxel");
+    }
   }
 
   // Determinism test.

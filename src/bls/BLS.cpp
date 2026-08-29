@@ -88,7 +88,8 @@ void Analyzer::setSelection(const std::vector<int>& indices, int natoms) {
   }
 }
 
-bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::string& err) {
+bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::string& err,
+                            std::vector<int>* labels) {
   ScopedTimer timer;
 
   Mat3 activeBox;
@@ -238,6 +239,11 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
 
   const std::vector<uint8_t>& occ = impl_->grid.occupancy();
   std::vector<uint8_t>& visited = impl_->grid.visited();
+  if (labels) {
+    labels->assign(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
+                       static_cast<std::size_t>(nz),
+                   -1);
+  }
 
   enumerator.forEach([&](const Enumerator::Seed& seed) {
     ++seeds;
@@ -248,7 +254,9 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
     if (!occ[idx] || visited[idx]) {
       return;
     }
-    int size = dfs.runFrom(seed.x, seed.y, seed.z);
+    // nclusters is the count of components already accepted, so it is the
+    // 0-based ordinal of this one: dense by construction.
+    int size = dfs.runFrom(seed.x, seed.y, seed.z, labels, nclusters);
     if (size > 0) {
       ++seedHits;
       ++nclusters;

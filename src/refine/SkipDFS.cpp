@@ -55,7 +55,7 @@ std::size_t SkipDFS::index(int x, int y, int z) const {
          static_cast<std::size_t>(z);
 }
 
-int SkipDFS::runFrom(int x, int y, int z) {
+int SkipDFS::runFrom(int x, int y, int z, std::vector<int>* labels, int labelValue) {
   if (x < 0 || y < 0 || z < 0 || x >= cfg_.nx || y >= cfg_.ny || z >= cfg_.nz) return 0;
   std::size_t start = index(x, y, z);
   if (!occ_[start] || visited_[start]) return 0;
@@ -71,6 +71,7 @@ int SkipDFS::runFrom(int x, int y, int z) {
   while (!stack_.empty()) {
     int idx = stack_.back();
     stack_.pop_back();
+    if (labels) (*labels)[static_cast<std::size_t>(idx)] = labelValue;
     ++clusterSize;
     ++refinedVoxels_;
 

@@ -34,7 +34,12 @@ class Analyzer {
 
   void setSelection(const std::vector<int>& indices, int natoms);
 
-  bool processFrame(const Frame& frame, FrameMetrics& metrics, std::string& err);
+  // When `labels` is non-null it is resized to nx*ny*nz and overwritten:
+  // unoccupied voxels get -1, occupied voxels get dense ids 0..nclusters-1.
+  // This is BLS's side of the label contract documented in cluster/Algorithms.hpp.
+  // Null (the default) allocates nothing and leaves the timed path untouched.
+  bool processFrame(const Frame& frame, FrameMetrics& metrics, std::string& err,
+                    std::vector<int>* labels = nullptr);
 
   double gridSpacing() const { return config_.gridSpacing; }
 

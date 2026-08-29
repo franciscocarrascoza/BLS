@@ -26,7 +26,11 @@ class SkipDFS {
   SkipDFS(const SkipDFSConfig& cfg, const std::vector<uint8_t>& occupancy,
           std::vector<uint8_t>& visited);
 
-  int runFrom(int x, int y, int z);
+  // Walk the component containing (x,y,z). When `labels` is non-null, every
+  // voxel claimed by this walk is stamped with `labelValue`; the caller owns
+  // the buffer and the numbering. Null (the default) writes nothing and costs
+  // one predictable branch per popped voxel.
+  int runFrom(int x, int y, int z, std::vector<int>* labels = nullptr, int labelValue = -1);
 
   std::size_t refinedVoxels() const { return refinedVoxels_; }
 

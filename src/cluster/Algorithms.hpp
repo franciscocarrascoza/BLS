@@ -55,6 +55,31 @@ struct ClusterParams {
   int minSamples{5};            // Minimum samples for HDBSCAN core points
 };
 
+// Optional per-voxel label output.
+//
+// Comparing cluster counts alone cannot distinguish a correct labelling from
+// one that merges one pair of components and splits another; the counts match
+// while the partition is wrong. Differential testing therefore needs the
+// partition itself, not a summary of it.
+//
+// Contract when a caller passes a non-null `labels`:
+//   - it is resized to nx*ny*nz and overwritten in full;
+//   - unoccupied voxels get -1;
+//   - occupied voxels get dense ids 0..nclusters-1.
+// The particular id an algorithm assigns to a given component is arbitrary and
+// differs between algorithms. Canonical relabelling for comparison is the
+// harness's job, deliberately not done here: forcing a canonical order inside
+// each algorithm would cost a sort that the timed benchmark path must not pay,
+// and would hide exactly the ordering differences a harness may want to see.
+//
+// Passing nullptr (the default) allocates nothing and leaves the benchmark
+// path as it was.
+//
+// Supported by the six exact algorithms -- TraditionalDFS, CC3D,
+// CC3DOptimized, GCBD, RLECCL, OctreeCCL -- and, through Analyzer, by BLS.
+// Requesting labels from any other algorithm throws rather than returning a
+// buffer that silently does not mean what it appears to.
+
 // Run a clustering algorithm on the given occupancy grid
 // Returns the clustering result
 // The algorithms operate directly on the grid data to keep implementations pure
@@ -62,7 +87,11 @@ ClusterResult runClusterAlgorithm(
     ClusterAlgorithm algo,
     const ClusterParams& params,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
+
+// True if runClusterAlgorithm accepts a non-null `labels` for this algorithm.
+bool supportsLabels(ClusterAlgorithm algo);
 
 // Individual algorithm implementations (kept simple for benchmarking fairness)
 
@@ -70,7 +99,8 @@ ClusterResult runClusterAlgorithm(
 ClusterResult traditionalDFS(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
 
 // Skip-DFS clustering - O(n/skip^3) expected
 ClusterResult skipDFS(
@@ -110,7 +140,8 @@ ClusterResult spectral(
 ClusterResult gcbd(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
 
 // HDBSCAN (Hierarchical Density-Based Spatial Clustering)
 ClusterResult hdbscan(
@@ -126,7 +157,8 @@ ClusterResult cc3d(
     int nx, int ny, int nz,
     int connectivity,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
 
 // CC3D Optimized - Uses path compression and union-by-rank
 // For reference comparison only (not for fair benchmarking against BLS)
@@ -134,7 +166,8 @@ ClusterResult cc3dOptimized(
     int nx, int ny, int nz,
     int connectivity,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
 
 // RLE-based CCL - Run-Length Encoding Connected Component Labeling
 // Encodes consecutive occupied voxels as runs; merges adjacent runs via union-find.
@@ -142,7 +175,8 @@ ClusterResult cc3dOptimized(
 ClusterResult rleCCL(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
 
 // Octree-based CCL - Hierarchical grid subdivision
 // Recursively skips empty octants; runs local connectivity at leaves.
@@ -152,7 +186,8 @@ ClusterResult octreeCCL(
     int nx, int ny, int nz,
     int leafSize,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels = nullptr);
 
 // VCCS - Voxel Cloud Connected Segmentation
 // Places seeds on a uniform 3D grid (spacing = seedResolution voxels) then

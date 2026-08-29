@@ -147,3 +147,11 @@ if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
                                                  INSTALL_RPATH "${_bls_xdr_rpath}")
 endif()
 add_test(NAME geometry COMMAND test_geometry)
+
+add_executable(test_labels tests/test_labels.cpp)
+target_link_libraries(test_labels PRIVATE bls_core)
+if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
+  set_target_properties(test_labels PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
+                                               INSTALL_RPATH "${_bls_xdr_rpath}")
+endif()
+add_test(NAME labels COMMAND test_labels)

@@ -7,6 +7,7 @@
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -43,6 +44,30 @@ inline std::size_t idx3(int i, int j, int k, int ny, int nz) {
 // 6-connectivity deltas
 constexpr int deltas6[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
                                 {0, 1, 0},  {0, 0, -1}, {0, 0, 1}};
+
+// --- optional label output (see Algorithms.hpp) -----------------------------
+//
+// Both helpers no-op on nullptr, so the benchmark path allocates nothing and
+// pays only a null check outside any hot loop.
+
+inline void initLabels(std::vector<int>* labels, std::size_t totalSize) {
+  if (labels) labels->assign(totalSize, -1);
+}
+
+// Compacts arbitrary non-negative component keys -- for the union-find methods,
+// the root voxel index -- into dense ids 0..k-1 in order of first appearance.
+// Voxels left at -1 (unoccupied) are untouched.
+void compactLabels(std::vector<int>* labels) {
+  if (!labels) return;
+  std::unordered_map<int, int> remap;
+  int next = 0;
+  for (int& v : *labels) {
+    if (v < 0) continue;
+    auto it = remap.find(v);
+    if (it == remap.end()) it = remap.emplace(v, next++).first;
+    v = it->second;
+  }
+}
 
 }  // namespace
 
@@ -94,11 +119,35 @@ std::vector<std::string> listAlgorithms() {
           "cc3d", "cc3d_optimized", "rle_ccl", "octree_ccl", "vccs"};
 }
 
+bool supportsLabels(ClusterAlgorithm algo) {
+  switch (algo) {
+    case ClusterAlgorithm::TraditionalDFS:
+    case ClusterAlgorithm::GCBD:
+    case ClusterAlgorithm::CC3D:
+    case ClusterAlgorithm::CC3DOptimized:
+    case ClusterAlgorithm::RLECCL:
+    case ClusterAlgorithm::OctreeCCL:
+      return true;
+    default:
+      // BLS is labelled through Analyzer, not here. The remaining methods
+      // (skip_dfs, dbscan, hierarchical, kmeans, spectral, hdbscan, vccs) are
+      // not exact partitioners and have no label output yet.
+      return false;
+  }
+}
+
 ClusterResult runClusterAlgorithm(
     ClusterAlgorithm algo,
     const ClusterParams& params,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
+
+  if (labels && !supportsLabels(algo)) {
+    throw std::runtime_error("Label output requested for '" + algorithmToString(algo) +
+                             "', which does not provide one. Returning an unlabelled or "
+                             "partially labelled buffer would look like a valid partition.");
+  }
 
   // Note: BLS is handled separately in the main analyzer since it requires
   // lattice enumeration. This function handles the comparison algorithms.
@@ -106,7 +155,7 @@ ClusterResult runClusterAlgorithm(
     case ClusterAlgorithm::BLS:
       throw std::runtime_error("BLS algorithm should be run through the Analyzer class.");
     case ClusterAlgorithm::TraditionalDFS:
-      return traditionalDFS(params.nx, params.ny, params.nz, occupancy, visited);
+      return traditionalDFS(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::SkipDFS:
       return skipDFS(params.nx, params.ny, params.nz, params.skip, occupancy, visited);
     case ClusterAlgorithm::DBSCAN:
@@ -118,19 +167,20 @@ ClusterResult runClusterAlgorithm(
     case ClusterAlgorithm::Spectral:
       return spectral(params.nx, params.ny, params.nz, params.k, occupancy, visited);
     case ClusterAlgorithm::GCBD:
-      return gcbd(params.nx, params.ny, params.nz, occupancy, visited);
+      return gcbd(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::HDBSCAN:
       return hdbscan(params.nx, params.ny, params.nz, params.minClusterSize, params.minSamples, occupancy, visited);
     case ClusterAlgorithm::CC3D:
-      return cc3d(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited);
+      return cc3d(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited, labels);
     case ClusterAlgorithm::CC3DOptimized:
-      return cc3dOptimized(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited);
+      return cc3dOptimized(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited,
+                           labels);
     case ClusterAlgorithm::RLECCL:
-      return rleCCL(params.nx, params.ny, params.nz, occupancy, visited);
+      return rleCCL(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::OctreeCCL:
       // Use params.skip as leaf size (default 8 voxels per side for good balance)
       return octreeCCL(params.nx, params.ny, params.nz,
-                       params.skip > 0 ? params.skip : 8, occupancy, visited);
+                       params.skip > 0 ? params.skip : 8, occupancy, visited, labels);
     case ClusterAlgorithm::VCCS:
       // Use params.eps as seed spacing in voxels (default 3.0)
       return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
@@ -142,13 +192,15 @@ ClusterResult runClusterAlgorithm(
 ClusterResult traditionalDFS(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   std::vector<StackElement> stack;
   stack.reserve(10000);
@@ -175,6 +227,11 @@ ClusterResult traditionalDFS(
         if (occupancy[index] == 0 || visited[index]) continue;
 
         visited[index] = 1;
+        // result.nclusters is the number of components already completed, so
+        // it is the 0-based ordinal of the one being walked: dense already.
+        // compactLabels() below is then a no-op, kept so the contract survives
+        // any future change to the order components are discovered in.
+        if (labels) (*labels)[index] = result.nclusters;
         clusterSize++;
         result.visitedVoxels++;
 
@@ -196,6 +253,7 @@ ClusterResult traditionalDFS(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -723,13 +781,15 @@ ClusterResult spectral(
 ClusterResult gcbd(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   // Union-Find structure operating on voxel indices
   std::vector<int> parent(totalSize);
@@ -793,6 +853,7 @@ ClusterResult gcbd(
         if (occupancy[idx] == 1) {
           int root = find(static_cast<int>(idx));
           clusterSizeMap[root]++;
+          if (labels) (*labels)[idx] = root;
           visited[idx] = 1;
           result.visitedVoxels++;
         }
@@ -808,6 +869,7 @@ ClusterResult gcbd(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -983,13 +1045,15 @@ ClusterResult cc3d(
     int nx, int ny, int nz,
     int connectivity,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   // 26-connectivity deltas (includes 6-connectivity as subset)
   constexpr int deltas26[26][3] = {
@@ -1040,6 +1104,7 @@ ClusterResult cc3d(
         if (occupancy[idx] == 1) {
           int root = uf.find(static_cast<int>(idx));
           clusterSizeMap[root]++;
+          if (labels) (*labels)[idx] = root;
           visited[idx] = 1;
           result.visitedVoxels++;
         }
@@ -1055,6 +1120,7 @@ ClusterResult cc3d(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -1066,13 +1132,15 @@ ClusterResult cc3dOptimized(
     int nx, int ny, int nz,
     int connectivity,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   // 26-connectivity deltas (includes 6-connectivity as subset)
   constexpr int deltas26[26][3] = {
@@ -1152,6 +1220,7 @@ ClusterResult cc3dOptimized(
         if (occupancy[idx] == 1) {
           int root = find(static_cast<int>(idx));
           clusterSizeMap[root]++;
+          if (labels) (*labels)[idx] = root;
           visited[idx] = 1;
           result.visitedVoxels++;
         }
@@ -1167,6 +1236,7 @@ ClusterResult cc3dOptimized(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -1188,13 +1258,15 @@ ClusterResult cc3dOptimized(
 ClusterResult rleCCL(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   // Global union-find over voxel indices (path-halving + union-by-rank)
   std::vector<int> parent(totalSize);
@@ -1303,6 +1375,7 @@ ClusterResult rleCCL(
         if (occupancy[idx] == 1) {
           int root = find(static_cast<int>(idx));
           clusterSizeMap[root]++;
+          if (labels) (*labels)[idx] = root;
           visited[idx] = 1;
           result.visitedVoxels++;
         }
@@ -1318,6 +1391,7 @@ ClusterResult rleCCL(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -1466,13 +1540,15 @@ ClusterResult octreeCCL(
     int nx, int ny, int nz,
     int leafSize,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   if (leafSize <= 0) leafSize = 8;
 
@@ -1493,6 +1569,7 @@ ClusterResult octreeCCL(
         if (occupancy[idx] == 1) {
           int root = octreeFind(parent, static_cast<int>(idx));
           clusterSizeMap[root]++;
+          if (labels) (*labels)[idx] = root;
           visited[idx] = 1;
           result.visitedVoxels++;
         }
@@ -1506,6 +1583,7 @@ ClusterResult octreeCCL(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
