@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 libxdrfile/build/
 libxdrfile/install/
 CMakeFiles/
