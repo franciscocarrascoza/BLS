@@ -177,3 +177,12 @@ if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
 endif()
 add_test(NAME metamorphic COMMAND test_metamorphic)
 set_tests_properties(metamorphic PROPERTIES TIMEOUT 900)
+
+add_executable(test_bls_guarantees tests/test_bls_guarantees.cpp)
+target_link_libraries(test_bls_guarantees PRIVATE bls_core)
+if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
+  set_target_properties(test_bls_guarantees PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
+                                                       INSTALL_RPATH "${_bls_xdr_rpath}")
+endif()
+add_test(NAME bls_guarantees COMMAND test_bls_guarantees)
+set_tests_properties(bls_guarantees PROPERTIES TIMEOUT 1800)
