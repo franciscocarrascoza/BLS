@@ -9,5 +9,6 @@ BLS ...
   RADII 1.4,2.0                # O van der Waals 1.4 Å, H 2.0 Å (conservative)
   CUTOFF 0.8                   # Occupancy threshold within voxel (how much area of the VDW atom covers a voxel)
   OCCUPANCY ANY                # Voxel occupied if atom present: ANY=OR logic; ALL=AND logic; AVERAGE=occupancy must meet CUTOFF
-  OUTPUT NCLUSTERS,MAX_CLUSTER,SEED_HITS,SEEDS,REFINED_VOXELS
+  LATTICE cubic                # Task 9e: was the silent default; stated explicitly, behaviour unchanged
+  CENTERING F                  # Task 9e: was the silent default; stated explicitly, behaviour unchanged
 ... BLS

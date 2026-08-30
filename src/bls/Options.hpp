@@ -23,17 +23,30 @@ struct ProgramOptions {
   std::size_t startFrame{0};
   std::size_t stopFrame{std::numeric_limits<std::size_t>::max()};
   int threads{1};
-  bool wantBench{false};
   bool quiet{false};
-  // Algorithm-specific parameters
-  int algoSkip{3};           // Skip distance for skip_dfs
+  // Algorithm-specific parameters.
+  //
+  // One name per meaning, deliberately. Until Task 9 a single --algo-skip fed
+  // two unrelated algorithms: skip_dfs's jump distance and octree_ccl's leaf
+  // size. octree_ccl's own comment documented an intended leaf size of 8, but
+  // it inherited algoSkip's default of 3 instead, so every published
+  // octree_ccl timing ran a ~6% slower tree than the one described. They are
+  // separate parameters now; see also BLSConfig::refinementStride, a third
+  // distinct quantity that was also called "skip".
+  int skipDfsJumpDistance{3};  // --algo-skip: jump distance for skip_dfs
+  int octreeLeafSize{8};       // --octree-leaf: leaf edge, voxels, octree_ccl
   double algoEps{3.0};       // Epsilon for DBSCAN
   int algoMinPts{10};        // MinPts for DBSCAN
   int algoK{20};             // K for k-means/spectral
   double algoThreshold{4.0}; // Threshold for hierarchical
   int algoMinClusterSize{5}; // Minimum cluster size for HDBSCAN
   int algoMinSamples{5};     // Minimum samples for HDBSCAN
+  // 6 is a legal value, so it cannot also mean "unset" -- with the old
+  // sentinel test (algoConnectivity != 6) an explicit --algo-connectivity 6
+  // was indistinguishable from no flag at all, and silently lost to a config
+  // saying 26. Tracked with an explicit flag, as --stride already does.
   int algoConnectivity{6};   // Connectivity for CC3D (6 or 26)
+  bool algoConnectivitySet{false};
 };
 
 enum class GroupSelectorType { All, IndexRange, Name };
@@ -94,8 +107,18 @@ enum class LatticeType { Cubic, Hexagonal, Triclinic };
 enum class CenteringType { P, F, I };
 
 struct LatticeSettings {
+  // No default worth trusting. cubic/F used to be the silent fallback, and
+  // while the enumerator was broken (fixed in a90066e) that fallback was inert
+  // -- every occupied voxel became a seed regardless of lattice, so the field
+  // did nothing. It is load-bearing now: on ld-asw, cubic/F versus the
+  // structure's own lattice moves the cluster count by 17%. A config that
+  // omits LATTICE or CENTERING is therefore rejected rather than defaulted;
+  // `set` records whether the config said so. The initialisers below are only
+  // the pre-parse state and must never be read as a policy choice.
   LatticeType lattice{LatticeType::Cubic};
+  bool latticeSet{false};
   CenteringType centering{CenteringType::F};
+  bool centeringSet{false};
   double hexCOverA{1.633};
   double triclinicA{1.0};
   double triclinicB{1.2};
@@ -111,7 +134,10 @@ struct BLSConfig {
   ManualBox manualBox{};
   double gridSpacing{0.25};
   int connectivity{6};
-  int skip{3};
+  // Config keyword SKIP. BLS's refinement (refine::SkipDFS) advances this many
+  // voxels per step; it is NOT ProgramOptions::skipDfsJumpDistance, which
+  // belongs to the unrelated cluster::skipDFS comparison algorithm.
+  int refinementStride{3};
   double alpha{0.7};
   double dnn{0.0};
   bool hasExplicitDnn{false};
@@ -120,8 +146,9 @@ struct BLSConfig {
   OccupancyMode occupancy{OccupancyMode::Any};
   LatticeSettings lattice;
   int stride{1};
-  std::vector<std::string> outputs{
-      "NCLUSTERS", "MAX_CLUSTER", "SEED_HITS", "SEEDS", "REFINED_VOXELS"};
+  // No `outputs` field: the CSV and JSON column sets are fixed in main.cpp.
+  // The OUTPUT keyword that used to fill this was parsed and then never read
+  // by anything; see Parser.cpp for why it was deleted rather than wired up.
 };
 
 struct InputDeck {

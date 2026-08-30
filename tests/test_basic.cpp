@@ -143,7 +143,7 @@ int main() {
     BLSConfig cfg;
     cfg.gridSpacing = 1.0;
     cfg.connectivity = 6;
-    cfg.skip = 1;
+    cfg.refinementStride = 1;
     cfg.lattice.lattice = LatticeType::Cubic;
     cfg.lattice.centering = CenteringType::P;
 

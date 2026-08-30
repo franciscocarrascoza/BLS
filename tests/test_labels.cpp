@@ -101,7 +101,7 @@ int main() {
     ClusterParams params;
     params.nx = c.nx; params.ny = c.ny; params.nz = c.nz;
     params.connectivity = 6;
-    params.skip = 8;  // octree leaf size, via the documented overload
+    params.octreeLeafSize = 8;  // the shipped default, stated explicitly
 
     for (ClusterAlgorithm algo : kLabelled) {
       const std::string tag = c.name + "/" + bls::algorithmToString(algo);
@@ -251,7 +251,7 @@ int main() {
       bls::BLSConfig cfg;
       cfg.gridSpacing = 1.0;
       cfg.connectivity = 6;
-      cfg.skip = 1;
+      cfg.refinementStride = 1;
       cfg.cutoff = 1.0;
       cfg.lattice.lattice = bls::LatticeType::Cubic;
       cfg.lattice.centering = trial % 2 ? bls::CenteringType::F : bls::CenteringType::P;

@@ -180,7 +180,10 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
       } else if (upperKeyword == "CONNECTIVITY") {
         config.connectivity = std::stoi(rest);
       } else if (upperKeyword == "SKIP") {
-        config.skip = std::stoi(rest);
+        // Kept as the config spelling for backward compatibility with the 83
+        // E0-E5 decks. It maps to the refinement stride and to nothing else --
+        // not to --algo-skip (skip_dfs) and not to the octree leaf size.
+        config.refinementStride = std::stoi(rest);
       } else if (upperKeyword == "ALPHA") {
         config.alpha = std::stod(rest);
       } else if (upperKeyword == "DNN") {
@@ -194,8 +197,10 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
         config.occupancy = occupancyFromString(rest);
       } else if (upperKeyword == "LATTICE") {
         config.lattice.lattice = latticeFromString(rest);
+        config.lattice.latticeSet = true;
       } else if (upperKeyword == "CENTERING") {
         config.lattice.centering = centeringFromString(rest);
+        config.lattice.centeringSet = true;
       } else if (upperKeyword == "HEX_C_OVER_A") {
         config.lattice.hexCOverA = std::stod(rest);
       } else if (upperKeyword == "TRICLINIC_A") {
@@ -212,8 +217,6 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
         config.lattice.triclinicGammaDeg = std::stod(rest);
       } else if (upperKeyword == "STRIDE") {
         config.stride = std::stoi(rest);
-      } else if (upperKeyword == "OUTPUT") {
-        config.outputs = split(rest, ',');
       } else {
         Logger::warn("Unrecognized keyword at line ", lineNo, ": ", keyword);
       }
@@ -225,6 +228,27 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
 
   if (inBlock) {
     err = "Missing closing \"... BLS\" in config file.";
+    return false;
+  }
+
+  // Deliberately fatal rather than defaulted. See LatticeSettings in
+  // Options.hpp: the old silent cubic/F fallback shifts the cluster count by
+  // 17% on ld-asw now that lattice enumeration actually works, and a config
+  // that does not say which lattice it means cannot be reproduced from its
+  // own text.
+  if (!config.lattice.latticeSet || !config.lattice.centeringSet) {
+    std::string missing;
+    if (!config.lattice.latticeSet) missing = "LATTICE";
+    if (!config.lattice.centeringSet) {
+      if (!missing.empty()) missing += " and ";
+      missing += "CENTERING";
+    }
+    err = "Config is missing " + missing +
+          ". Both are required -- there is no default. State the lattice the "
+          "run is meant to use, e.g.\n"
+          "    LATTICE cubic\n"
+          "    CENTERING F\n"
+          "(LATTICE: cubic | hexagonal | triclinic. CENTERING: P | F | I.)";
     return false;
   }
 

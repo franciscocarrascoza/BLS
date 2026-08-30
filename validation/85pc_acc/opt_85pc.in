@@ -9,5 +9,6 @@ BLS ...
   RADII 1.4,2.0
   CUTOFF 0.75                  # Balance noise vs coverage
   OCCUPANCY ANY
-  OUTPUT NCLUSTERS,MAX_CLUSTER,SEED_HITS,SEEDS,REFINED_VOXELS
+  LATTICE cubic                # Task 9e: was the silent default; stated explicitly, behaviour unchanged
+  CENTERING F                  # Task 9e: was the silent default; stated explicitly, behaviour unchanged
 ... BLS

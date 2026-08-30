@@ -61,7 +61,7 @@ int SkipDFS::runFrom(int x, int y, int z, std::vector<int>* labels, int labelVal
   if (!occ_[start] || visited_[start]) return 0;
 
   int clusterSize = 0;
-  int maxSkip = std::max(1, cfg_.skip);
+  int maxSkip = std::max(1, cfg_.refinementStride);
   refinedVoxels_ = 0;
 
   stack_.clear();

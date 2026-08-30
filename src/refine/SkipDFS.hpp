@@ -12,7 +12,9 @@ struct SkipDFSConfig {
   int ny{0};
   int nz{0};
   int connectivity{6};
-  int skip{3};
+  // BLS's refinement stride (config keyword SKIP). Unrelated to
+  // cluster::skipDFS's jump distance despite the shared word.
+  int refinementStride{3};
 };
 
 struct SkipDFSResult {

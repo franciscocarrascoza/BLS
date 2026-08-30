@@ -227,7 +227,7 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
   Enumerator enumerator(impl_->scaledBasis, impl_->lattice.offsets, nx, ny, nz,
                         impl_->grid.occupancy());
 
-  SkipDFSConfig skipCfg{nx, ny, nz, config_.connectivity, config_.skip};
+  SkipDFSConfig skipCfg{nx, ny, nz, config_.connectivity, config_.refinementStride};
   SkipDFS dfs(skipCfg, impl_->grid.occupancy(), impl_->grid.visited());
 
   int seeds = 0;

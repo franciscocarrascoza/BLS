@@ -54,7 +54,8 @@ void printUsage() {
                "                           rle_ccl - Run-Length Encoding CCL (sparse-aware, Cat 2a)\n"
                "                           octree_ccl - Octree-based CCL (skip empty octants, Cat 2a)\n"
                "                           vccs - Voxel Cloud Connected Segmentation (Cat 2e)\n"
-               "  --algo-skip N          Skip distance for skip_dfs (default: 3)\n"
+               "  --algo-skip N          Jump distance for skip_dfs (default: 3)\n"
+               "  --octree-leaf N        Leaf edge in voxels for octree_ccl (default: 8)\n"
                "  --algo-eps F           Epsilon for DBSCAN (default: 3.0)\n"
                "  --algo-minpts N        MinPts for DBSCAN (default: 10)\n"
                "  --algo-k N             K for k-means/spectral (default: 20)\n"
@@ -230,7 +231,9 @@ int main(int argc, char** argv) {
       } else if (arg == "--algo") {
         opts.algorithmOverride = requireArg(i, arg);
       } else if (arg == "--algo-skip") {
-        opts.algoSkip = safeParseInt(requireArg(i, arg), arg);
+        opts.skipDfsJumpDistance = safeParseInt(requireArg(i, arg), arg);
+      } else if (arg == "--octree-leaf") {
+        opts.octreeLeafSize = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--algo-eps") {
         opts.algoEps = safeParseDouble(requireArg(i, arg), arg);
       } else if (arg == "--algo-minpts") {
@@ -245,6 +248,7 @@ int main(int argc, char** argv) {
         opts.algoMinSamples = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--algo-connectivity") {
         opts.algoConnectivity = safeParseInt(requireArg(i, arg), arg);
+        opts.algoConnectivitySet = true;
       } else if (arg == "--compare-plumed") {
         opts.comparePlumedPath = requireArg(i, arg);
       } else if (arg == "--quiet") {
@@ -526,12 +530,14 @@ int main(int argc, char** argv) {
       params.nx = nx;
       params.ny = ny;
       params.nz = nz;
-      params.skip = opts.algoSkip;
+      params.skipDfsJumpDistance = opts.skipDfsJumpDistance;
+      params.octreeLeafSize = opts.octreeLeafSize;
       params.eps = opts.algoEps;
       params.minPts = opts.algoMinPts;
       params.k = opts.algoK;
       params.threshold = opts.algoThreshold;
-      params.connectivity = opts.algoConnectivity != 6 ? opts.algoConnectivity : config.connectivity;
+      params.connectivity =
+          opts.algoConnectivitySet ? opts.algoConnectivity : config.connectivity;
       params.minClusterSize = opts.algoMinClusterSize;
       params.minSamples = opts.algoMinSamples;
 

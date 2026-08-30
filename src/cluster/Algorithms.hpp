@@ -45,7 +45,11 @@ struct ClusterResult {
 // Parameters for clustering algorithms
 struct ClusterParams {
   int nx{0}, ny{0}, nz{0};     // Grid dimensions
-  int skip{3};                  // Skip distance for Skip-DFS
+  // Two separate fields on purpose: these feed different algorithms and have
+  // nothing to do with each other. A single `skip` used to feed both, which
+  // gave octree_ccl a leaf size of 3 against its documented intent of 8.
+  int skipDfsJumpDistance{3};   // Jump distance for cluster::skipDFS
+  int octreeLeafSize{8};        // Leaf edge, in voxels, for octreeCCL
   double eps{3.0};              // Epsilon for DBSCAN
   int minPts{10};               // MinPts for DBSCAN
   int k{20};                    // Number of clusters for k-means

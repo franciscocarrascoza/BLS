@@ -157,7 +157,8 @@ ClusterResult runClusterAlgorithm(
     case ClusterAlgorithm::TraditionalDFS:
       return traditionalDFS(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::SkipDFS:
-      return skipDFS(params.nx, params.ny, params.nz, params.skip, occupancy, visited);
+      return skipDFS(params.nx, params.ny, params.nz, params.skipDfsJumpDistance, occupancy,
+                     visited);
     case ClusterAlgorithm::DBSCAN:
       return dbscan(params.nx, params.ny, params.nz, params.eps, params.minPts, occupancy, visited);
     case ClusterAlgorithm::Hierarchical:
@@ -178,9 +179,9 @@ ClusterResult runClusterAlgorithm(
     case ClusterAlgorithm::RLECCL:
       return rleCCL(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::OctreeCCL:
-      // Use params.skip as leaf size (default 8 voxels per side for good balance)
       return octreeCCL(params.nx, params.ny, params.nz,
-                       params.skip > 0 ? params.skip : 8, occupancy, visited, labels);
+                       params.octreeLeafSize > 0 ? params.octreeLeafSize : 8, occupancy,
+                       visited, labels);
     case ClusterAlgorithm::VCCS:
       // Use params.eps as seed spacing in voxels (default 3.0)
       return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);

@@ -317,7 +317,7 @@ std::vector<int> runOne(const Method& m, const Grid3& g, int connectivity, Clust
   ClusterParams p;
   p.nx = g.nx; p.ny = g.ny; p.nz = g.nz;
   p.connectivity = connectivity;
-  p.skip = 8;  // octree leaf size, via the documented parameter overload
+  p.octreeLeafSize = 8;  // the shipped default, stated explicitly
   std::vector<uint8_t> visited(g.size(), 0);
   std::vector<int> labels;
   ClusterResult r = bls::runClusterAlgorithm(m.algo, p, g.occ, visited, &labels);

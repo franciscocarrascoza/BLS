@@ -192,7 +192,8 @@ Outcome run(const Method& m, const Grid3& g) {
   ClusterParams p;
   p.nx = g.nx; p.ny = g.ny; p.nz = g.nz;
   p.connectivity = 6;
-  p.skip = 1;
+  p.skipDfsJumpDistance = 1;
+  p.octreeLeafSize = 8;  // octree_ccl's shipped default, not skip_dfs's stride
   std::vector<uint8_t> visited(g.size(), 0);
   ClusterResult r = bls::runClusterAlgorithm(m.algo, p, g.occ, visited, nullptr);
   Outcome o;
