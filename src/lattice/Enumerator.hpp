@@ -62,14 +62,19 @@ class Enumerator {
   Enumerator(LegacyRadiusTag, const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
              int nz, const std::vector<uint8_t>& occupancy);
 
-  // Shared core for both public constructors. Walks the lattice indices whose
-  // sites can land in the grid and appends the in-range ones, then sorts and
-  // deduplicates by voxel. When `occupancy` is non-null a site is appended only
-  // if its voxel is occupied, so rejected sites are never materialised; the
-  // resulting seed set is identical to filtering afterwards, because occupancy
-  // is a function of the voxel alone and duplicates share a voxel.
+  // Shared core for both public constructors, dispatching on whether occupancy
+  // is available. Without it, walks every lattice index whose site can land in
+  // the grid, appends the in-range ones, then sorts and deduplicates by voxel.
+  // With it, defers to buildFromOccupancy, which returns the identical set.
   void build(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
              const std::vector<uint8_t>* occupancy);
+
+  // Occupancy-driven path taken by build() when occupancy is supplied: iterate
+  // occupied voxels and ask which lattice sites round onto them, rather than
+  // sweeping the whole grid volume. Produces the same seed set in the same
+  // order -- see the derivation above its definition in Enumerator.cpp.
+  void buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
+                          int nz, const std::vector<uint8_t>& occupancy);
 
   std::vector<Seed> seeds_;
 };

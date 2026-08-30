@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -22,8 +23,110 @@ struct Bounds {
 
 }  // namespace
 
+// Occupancy-driven enumeration. Same seed set as the volume sweep below, found
+// by inverting the question instead of sweeping: for each OCCUPIED voxel, is
+// there a lattice site that rounds to it?
+//
+// Why it is worth having: the volume sweep visits every lattice site in the
+// grid -- ~2.3M on E1/Ic -- to find the ~2.2k that land on the ~21k occupied
+// voxels. E1 occupancy is 0.09%, so >99.9% of that work is discarded, and
+// enumeration was 69-77% of BLS's total pipeline time on all four E1 systems.
+//
+// Why the seed set is provably identical, not merely equal in testing:
+// llround(site) == v implies |site_k - v_k| <= 0.5 for every k. Writing
+// idx = invBasis*site - offset and f0 = invBasis*v - offset gives
+// idx - f0 = invBasis*(site - v), so
+//     |idx_k - f0_k| <= 0.5 * sum_j |invBasis[k][j]|
+// which is the per-axis search half-width below. Every lattice index that
+// could round into v therefore lies inside the searched box; nothing outside
+// it needs testing. The acceptance test itself is byte-for-byte the volume
+// sweep's -- site = basis * (latticeIdx + offset), then llround -- so a
+// candidate is admitted on exactly the same arithmetic, with no tolerance and
+// no re-derived predicate. The bound is a superset, so widening it (the eps
+// below) can only add candidates that the exact test then rejects; it can
+// never change the answer.
+//
+// Emission order needs no sort: voxels are visited in x-major order, which is
+// the lexicographic (x,y,z) order the volume path sorts into, and each voxel is
+// tested once, which is what its dedup achieves.
+void Enumerator::buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
+                                    int ny, int nz, const std::vector<uint8_t>& occupancy) {
+  const Mat3 invBasis = inverse(basis);
+
+  // Half-width of the candidate box, per lattice-index axis. Derived above; the
+  // epsilon covers rounding in the bound's own arithmetic only.
+  const double eps = 1e-9;
+  double half[3];
+  for (int k = 0; k < 3; ++k) {
+    Vec3 r = invBasis.row(k);
+    half[k] = 0.5 * (std::fabs(r.x) + std::fabs(r.y) + std::fabs(r.z)) + eps;
+  }
+
+  std::vector<Vec3> offsetsReal;
+  offsetsReal.reserve(offsets.size());
+  for (const auto& o : offsets) offsetsReal.push_back(basis * o);
+
+  const std::size_t total = static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
+                            static_cast<std::size_t>(nz);
+  const std::size_t planeYZ = static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz);
+
+  for (std::size_t base = 0; base < total; ) {
+    // Occupancy is a few tenths of a percent dense here, so skip runs of empty
+    // voxels a machine word at a time rather than a byte at a time.
+    if (base + 8 <= total && (base & 7u) == 0) {
+      std::uint64_t word;
+      std::memcpy(&word, occupancy.data() + base, 8);
+      if (word == 0) { base += 8; continue; }
+    }
+    if (!occupancy[base]) { ++base; continue; }
+
+    const int vx = static_cast<int>(base / planeYZ);
+    const std::size_t rem = base - static_cast<std::size_t>(vx) * planeYZ;
+    const int vy = static_cast<int>(rem / static_cast<std::size_t>(nz));
+    const int vz = static_cast<int>(rem % static_cast<std::size_t>(nz));
+    const Vec3 v{static_cast<double>(vx), static_cast<double>(vy), static_cast<double>(vz)};
+
+    bool admitted = false;
+    for (std::size_t oi = 0; oi < offsets.size() && !admitted; ++oi) {
+      const Vec3 f0 = invBasis * (v - offsetsReal[oi]);
+      const int ixLo = static_cast<int>(std::ceil(f0.x - half[0]));
+      const int ixHi = static_cast<int>(std::floor(f0.x + half[0]));
+      if (ixLo > ixHi) continue;
+      const int iyLo = static_cast<int>(std::ceil(f0.y - half[1]));
+      const int iyHi = static_cast<int>(std::floor(f0.y + half[1]));
+      if (iyLo > iyHi) continue;
+      const int izLo = static_cast<int>(std::ceil(f0.z - half[2]));
+      const int izHi = static_cast<int>(std::floor(f0.z + half[2]));
+      if (izLo > izHi) continue;
+
+      for (int ix = ixLo; ix <= ixHi && !admitted; ++ix) {
+        for (int iy = iyLo; iy <= iyHi && !admitted; ++iy) {
+          for (int iz = izLo; iz <= izHi; ++iz) {
+            Vec3 latticeIdx{static_cast<double>(ix), static_cast<double>(iy),
+                            static_cast<double>(iz)};
+            Vec3 site = basis * (latticeIdx + offsets[oi]);
+            if (static_cast<int>(std::llround(site.x)) == vx &&
+                static_cast<int>(std::llround(site.y)) == vy &&
+                static_cast<int>(std::llround(site.z)) == vz) {
+              admitted = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (admitted) seeds_.push_back(Seed{vx, vy, vz});
+    ++base;
+  }
+}
+
 void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
                        const std::vector<uint8_t>* occupancy) {
+  if (occupancy) {
+    buildFromOccupancy(basis, offsets, nx, ny, nz, *occupancy);
+    return;
+  }
+
   Mat3 invBasis = inverse(basis);
 
   // A site s is kept iff llround(s_k) is in [0, n_k), i.e. iff s lies in the
