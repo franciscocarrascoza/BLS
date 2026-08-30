@@ -144,6 +144,11 @@ target_link_libraries(bls_analyze PRIVATE bls_core)
 # so a probe budget can be measured rather than assumed. See tools/probe_census.cpp.
 add_executable(bls_probe_census tools/probe_census.cpp)
 target_link_libraries(bls_probe_census PRIVATE bls_core)
+
+# VCCS seeding probe: audits how many seeds each VCCS track places and whether
+# the optimized track's pruning fires. See tools/vccs_probe.cpp.
+add_executable(bls_vccs_probe tools/vccs_probe.cpp)
+target_link_libraries(bls_vccs_probe PRIVATE bls_core)
 if(BLS_USE_XDRFILE)
   if(DEFINED _bls_xdr_rpath)
     set_target_properties(bls_core PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"

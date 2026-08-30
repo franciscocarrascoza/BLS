@@ -43,6 +43,20 @@ struct ClusterResult {
   std::size_t visitedVoxels{0};
   double elapsedMs{0.0};
   std::vector<int> clusterSizes;
+
+  // Seeding instrumentation. Written only by the two VCCS tracks and left at
+  // zero by every other algorithm; nothing branches on them. They exist so the
+  // seed budget can be audited against the code that actually runs, rather
+  // than by reimplementing the seeding rules somewhere they can drift.
+  //   seedCandidates     - fair: seed-grid points examined.
+  //                        optimized: seed cells containing structure.
+  //   seedsPlaced        - candidates that became a supervoxel seed.
+  //   seedPruneThreshold - optimized: minimum occupied neighbours within
+  //                        Rsearch = S/2 for a candidate to survive. 0 in the
+  //                        fair track, which does not prune.
+  int seedCandidates{0};
+  int seedsPlaced{0};
+  int seedPruneThreshold{0};
 };
 
 // Parameters for clustering algorithms

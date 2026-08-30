@@ -1567,6 +1567,7 @@ ClusterResult vccs(
   for (int si = halfS; si < nx; si += S) {
     for (int sj = halfS; sj < ny; sj += S) {
       for (int sk = halfS; sk < nz; sk += S) {
+        ++result.seedCandidates;
         std::size_t seedIdx = idx3(si, sj, sk, ny, nz);
         if (occupancy[seedIdx] == 1 && assignment[seedIdx] == -1) {
           // Start a new cluster from this seed
@@ -1594,6 +1595,9 @@ ClusterResult vccs(
       }
     }
   }
+  // Captured before the remainder pass below, which also advances clusterId.
+  result.seedsPlaced = clusterId;
+  result.seedPruneThreshold = 0;   // the fair track does not prune
 
   // BFS expansion: assign each unassigned occupied voxel to the nearest seed's cluster
   while (!pq.empty()) {
@@ -1834,6 +1838,9 @@ ClusterResult vccsOptimized(
         }
     if (neighbours >= minPoints) seeds.push_back(c);
   }
+  result.seedCandidates = static_cast<int>(cells.size());
+  result.seedsPlaced = static_cast<int>(seeds.size());
+  result.seedPruneThreshold = minPoints;
   // Seeds are keyed through an unordered_map, whose iteration order is not
   // specified; sorting restores a deterministic cluster numbering.
   std::sort(seeds.begin(), seeds.end());
