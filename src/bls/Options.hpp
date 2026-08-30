@@ -28,16 +28,14 @@ struct ProgramOptions {
   //
   // One name per meaning, deliberately. Until Task 9 a single --algo-skip fed
   // two unrelated algorithms: skip_dfs's jump distance and octree_ccl's leaf
-  // size. octree_ccl's own comment documented an intended leaf size of 8, but
-  // it inherited algoSkip's default of 3 instead, so every published
-  // octree_ccl timing ran a ~6% slower tree than the one described. They are
-  // separate parameters now; see also BLSConfig::refinementStride, a third
-  // distinct quantity that was also called "skip".
+  // size, which is how octree_ccl silently ran at leaf 3 against its own
+  // documented intent of 8. octree_ccl was removed in Task 12; the naming rule
+  // it motivated stays. See also BLSConfig::refinementStride, a third distinct
+  // quantity that was also called "skip".
   int skipDfsJumpDistance{3};  // --algo-skip: jump distance for skip_dfs
-  int octreeLeafSize{8};       // --octree-leaf: leaf edge, voxels, octree_ccl
   double algoEps{3.0};       // Epsilon for DBSCAN
   int algoMinPts{10};        // MinPts for DBSCAN
-  int algoK{20};             // K for k-means/spectral
+  int algoK{20};             // K for k-means
   double algoThreshold{4.0}; // Threshold for hierarchical
   int algoMinClusterSize{5}; // Minimum cluster size for HDBSCAN
   int algoMinSamples{5};     // Minimum samples for HDBSCAN

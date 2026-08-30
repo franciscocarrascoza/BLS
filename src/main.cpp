@@ -46,19 +46,18 @@ void printUsage() {
                "                           dbscan - DBSCAN clustering\n"
                "                           hierarchical - Single-linkage hierarchical\n"
                "                           kmeans - K-means clustering\n"
-               "                           spectral - Spectral clustering (simplified)\n"
                "                           gcbd - Union-Find grid connectivity\n"
                "                           hdbscan - Hierarchical DBSCAN\n"
                "                           cc3d - Connected Components 3D (fair: basic Union-Find)\n"
-               "                           cc3d_optimized - CC3D with optimizations (reference only)\n"
-               "                           rle_ccl - Run-Length Encoding CCL (sparse-aware, Cat 2a)\n"
-               "                           octree_ccl - Octree-based CCL (skip empty octants, Cat 2a)\n"
-               "                           vccs - Voxel Cloud Connected Segmentation (Cat 2e)\n"
+               "                           cc3d_optimized - CC3D, SAUF decision-tree two-pass scan\n"
+               "                           rle_ccl - Run-Length Encoding CCL (fair: per-voxel union-find)\n"
+               "                           rle_ccl_optimized - RLE-CCL with runs as the union-find domain\n"
+               "                           vccs - Voxel Cloud Connected Segmentation (fair: uniform seeds)\n"
+               "                           vccs_optimized - VCCS with adaptive seeding and seed pruning\n"
                "  --algo-skip N          Jump distance for skip_dfs (default: 3)\n"
-               "  --octree-leaf N        Leaf edge in voxels for octree_ccl (default: 8)\n"
                "  --algo-eps F           Epsilon for DBSCAN (default: 3.0)\n"
                "  --algo-minpts N        MinPts for DBSCAN (default: 10)\n"
-               "  --algo-k N             K for k-means/spectral (default: 20)\n"
+               "  --algo-k N             K for k-means (default: 20)\n"
                "  --algo-threshold F     Threshold for hierarchical (default: 4.0)\n"
                "  --algo-minclustersize N  Minimum cluster size for HDBSCAN (default: 5)\n"
                "  --algo-minsamples N    Minimum samples for HDBSCAN (default: 5)\n"
@@ -232,8 +231,6 @@ int main(int argc, char** argv) {
         opts.algorithmOverride = requireArg(i, arg);
       } else if (arg == "--algo-skip") {
         opts.skipDfsJumpDistance = safeParseInt(requireArg(i, arg), arg);
-      } else if (arg == "--octree-leaf") {
-        opts.octreeLeafSize = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--algo-eps") {
         opts.algoEps = safeParseDouble(requireArg(i, arg), arg);
       } else if (arg == "--algo-minpts") {
@@ -531,7 +528,6 @@ int main(int argc, char** argv) {
       params.ny = ny;
       params.nz = nz;
       params.skipDfsJumpDistance = opts.skipDfsJumpDistance;
-      params.octreeLeafSize = opts.octreeLeafSize;
       params.eps = opts.algoEps;
       params.minPts = opts.algoMinPts;
       params.k = opts.algoK;

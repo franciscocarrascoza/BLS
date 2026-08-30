@@ -14,14 +14,17 @@ enum class ClusterAlgorithm {
   DBSCAN,        // Density-based clustering
   Hierarchical,  // Single-linkage hierarchical
   KMeans,        // K-means clustering
-  Spectral,      // Simplified spectral clustering
   GCBD,          // Union-Find based clustering
   HDBSCAN,       // Hierarchical DBSCAN
   CC3D,          // Connected Components 3D (fair: basic Union-Find)
-  CC3DOptimized, // Connected Components 3D (optimized: path compression + union-by-rank)
-  RLECCL,        // Run-Length Encoding CCL (sparse-aware, Category 2a)
-  OctreeCCL,     // Octree-based CCL (hierarchical, skips empty octants, Category 2a)
-  VCCS           // Voxel Cloud Connected Segmentation (uniform-grid seeding, Category 2e)
+  // Dual-track pairs. Each <X> is the textbook-fair variant held to the same
+  // optimization level as BLS; each <X>Optimized is the method as it is
+  // actually published and deployed. Both tracks are reported.
+  CC3DOptimized, // CC3D, SAUF decision-tree two-pass scan over occupied voxels
+  RLECCL,        // Run-Length Encoding CCL (textbook: per-voxel union-find)
+  RLECCLOptimized,  // RLE-CCL with runs, not voxels, as the union-find domain
+  VCCS,          // Voxel Cloud Connected Segmentation (textbook: uniform seeds)
+  VCCSOptimized  // VCCS with the published adaptive seeding and seed pruning
 };
 
 // Convert string to algorithm enum
@@ -45,11 +48,10 @@ struct ClusterResult {
 // Parameters for clustering algorithms
 struct ClusterParams {
   int nx{0}, ny{0}, nz{0};     // Grid dimensions
-  // Two separate fields on purpose: these feed different algorithms and have
-  // nothing to do with each other. A single `skip` used to feed both, which
-  // gave octree_ccl a leaf size of 3 against its documented intent of 8.
+  // Named for what it feeds, after a single `skip` fed two unrelated
+  // algorithms and gave the (since removed) octree_ccl a leaf size of 3
+  // against its documented intent of 8.
   int skipDfsJumpDistance{3};   // Jump distance for cluster::skipDFS
-  int octreeLeafSize{8};        // Leaf edge, in voxels, for octreeCCL
   double eps{3.0};              // Epsilon for DBSCAN
   int minPts{10};               // MinPts for DBSCAN
   int k{20};                    // Number of clusters for k-means
@@ -80,7 +82,7 @@ struct ClusterParams {
 // path as it was.
 //
 // Supported by the six exact algorithms -- TraditionalDFS, CC3D,
-// CC3DOptimized, GCBD, RLECCL, OctreeCCL -- and, through Analyzer, by BLS.
+// CC3DOptimized, GCBD, RLECCL -- and, through Analyzer, by BLS.
 // Requesting labels from any other algorithm throws rather than returning a
 // buffer that silently does not mean what it appears to.
 
@@ -133,12 +135,6 @@ ClusterResult kmeans(
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited);
 
-// Simplified spectral clustering (without eigendecomposition library)
-ClusterResult spectral(
-    int nx, int ny, int nz,
-    int k,
-    const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
 
 // GCBD (Grid-based Connectivity using Union-Find)
 ClusterResult gcbd(
@@ -164,8 +160,9 @@ ClusterResult cc3d(
     std::vector<uint8_t>& visited,
     std::vector<int>* labels = nullptr);
 
-// CC3D Optimized - Uses path compression and union-by-rank
-// For reference comparison only (not for fair benchmarking against BLS)
+// CC3D Optimized - the method as actually deployed: a SAUF-style decision-tree
+// two-pass raster scan, with every auxiliary array sized to the number of
+// OCCUPIED voxels rather than to the grid volume.
 ClusterResult cc3dOptimized(
     int nx, int ny, int nz,
     int connectivity,
@@ -173,22 +170,19 @@ ClusterResult cc3dOptimized(
     std::vector<uint8_t>& visited,
     std::vector<int>* labels = nullptr);
 
-// RLE-based CCL - Run-Length Encoding Connected Component Labeling
-// Encodes consecutive occupied voxels as runs; merges adjacent runs via union-find.
-// Sparse-aware: complexity scales with number of runs, not grid volume.
+// RLE-based CCL, textbook track. Encodes runs but unions individual voxels, and
+// sweeps the full grid volume three times. Held at BLS's optimization level.
 ClusterResult rleCCL(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
     std::vector<int>* labels = nullptr);
 
-// Octree-based CCL - Hierarchical grid subdivision
-// Recursively skips empty octants; runs local connectivity at leaves.
-// Shares BLS's "skip empty space" philosophy via a different strategy.
-// leafSize: stop subdividing when all dimensions <= leafSize (default: 8)
-ClusterResult octreeCCL(
+// RLE-CCL Optimized - He et al., "A Run-Based Two-Scan Labeling Algorithm",
+// IEEE Trans. Image Processing 17(5), 2008. Runs, not voxels, are the
+// union-find domain; rows are iterated sparsely; no array is sized to the grid.
+ClusterResult rleCCLOptimized(
     int nx, int ny, int nz,
-    int leafSize,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
     std::vector<int>* labels = nullptr);
@@ -199,6 +193,16 @@ ClusterResult octreeCCL(
 // Structurally closest to BLS (seed + expand), but uses uniform rather than
 // crystallographic seeding — does NOT guarantee topological correctness.
 ClusterResult vccs(
+    int nx, int ny, int nz,
+    double seedResolution,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited);
+
+// VCCS Optimized - the supervoxel core of pcl::SupervoxelClustering
+// (Papon et al., CVPR 2013, BSD-3-Clause), ported rather than linked.
+// Adds the published adaptive seeding and seed pruning. See the definition for
+// what is deliberately omitted and why.
+ClusterResult vccsOptimized(
     int nx, int ny, int nz,
     double seedResolution,
     const std::vector<uint8_t>& occupancy,

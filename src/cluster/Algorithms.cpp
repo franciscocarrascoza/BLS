@@ -81,14 +81,16 @@ ClusterAlgorithm parseAlgorithm(const std::string& name) {
   if (lower == "dbscan") return ClusterAlgorithm::DBSCAN;
   if (lower == "hierarchical" || lower == "single_linkage") return ClusterAlgorithm::Hierarchical;
   if (lower == "kmeans" || lower == "k-means" || lower == "k_means") return ClusterAlgorithm::KMeans;
-  if (lower == "spectral") return ClusterAlgorithm::Spectral;
   if (lower == "gcbd" || lower == "union_find" || lower == "uf") return ClusterAlgorithm::GCBD;
   if (lower == "hdbscan") return ClusterAlgorithm::HDBSCAN;
   if (lower == "cc3d" || lower == "cc3d_basic") return ClusterAlgorithm::CC3D;
   if (lower == "cc3d_optimized" || lower == "cc3d_opt") return ClusterAlgorithm::CC3DOptimized;
   if (lower == "rle_ccl" || lower == "rleccl" || lower == "rle") return ClusterAlgorithm::RLECCL;
-  if (lower == "octree_ccl" || lower == "octreeccl" || lower == "octree") return ClusterAlgorithm::OctreeCCL;
+  if (lower == "rle_ccl_optimized" || lower == "rleccloptimized")
+    return ClusterAlgorithm::RLECCLOptimized;
   if (lower == "vccs") return ClusterAlgorithm::VCCS;
+  if (lower == "vccs_optimized" || lower == "vccsoptimized")
+    return ClusterAlgorithm::VCCSOptimized;
 
   throw std::runtime_error("Unknown clustering algorithm: " + name);
 }
@@ -101,22 +103,23 @@ std::string algorithmToString(ClusterAlgorithm algo) {
     case ClusterAlgorithm::DBSCAN: return "dbscan";
     case ClusterAlgorithm::Hierarchical: return "hierarchical";
     case ClusterAlgorithm::KMeans: return "kmeans";
-    case ClusterAlgorithm::Spectral: return "spectral";
     case ClusterAlgorithm::GCBD: return "gcbd";
     case ClusterAlgorithm::HDBSCAN: return "hdbscan";
     case ClusterAlgorithm::CC3D: return "cc3d";
     case ClusterAlgorithm::CC3DOptimized: return "cc3d_optimized";
     case ClusterAlgorithm::RLECCL: return "rle_ccl";
-    case ClusterAlgorithm::OctreeCCL: return "octree_ccl";
+    case ClusterAlgorithm::RLECCLOptimized: return "rle_ccl_optimized";
     case ClusterAlgorithm::VCCS: return "vccs";
+    case ClusterAlgorithm::VCCSOptimized: return "vccs_optimized";
   }
   return "unknown";
 }
 
 std::vector<std::string> listAlgorithms() {
   return {"bls", "traditional_dfs", "skip_dfs", "dbscan",
-          "hierarchical", "kmeans", "spectral", "gcbd", "hdbscan",
-          "cc3d", "cc3d_optimized", "rle_ccl", "octree_ccl", "vccs"};
+          "hierarchical", "kmeans", "gcbd", "hdbscan",
+          "cc3d", "cc3d_optimized", "rle_ccl", "rle_ccl_optimized",
+          "vccs", "vccs_optimized"};
 }
 
 bool supportsLabels(ClusterAlgorithm algo) {
@@ -126,12 +129,12 @@ bool supportsLabels(ClusterAlgorithm algo) {
     case ClusterAlgorithm::CC3D:
     case ClusterAlgorithm::CC3DOptimized:
     case ClusterAlgorithm::RLECCL:
-    case ClusterAlgorithm::OctreeCCL:
+    case ClusterAlgorithm::RLECCLOptimized:
       return true;
     default:
       // BLS is labelled through Analyzer, not here. The remaining methods
-      // (skip_dfs, dbscan, hierarchical, kmeans, spectral, hdbscan, vccs) are
-      // not exact partitioners and have no label output yet.
+      // (skip_dfs, dbscan, hierarchical, kmeans, hdbscan and both vccs
+      // variants) are not exact partitioners and have no label output yet.
       return false;
   }
 }
@@ -165,8 +168,6 @@ ClusterResult runClusterAlgorithm(
       return hierarchical(params.nx, params.ny, params.nz, params.threshold, occupancy, visited);
     case ClusterAlgorithm::KMeans:
       return kmeans(params.nx, params.ny, params.nz, params.k, occupancy, visited);
-    case ClusterAlgorithm::Spectral:
-      return spectral(params.nx, params.ny, params.nz, params.k, occupancy, visited);
     case ClusterAlgorithm::GCBD:
       return gcbd(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::HDBSCAN:
@@ -178,13 +179,13 @@ ClusterResult runClusterAlgorithm(
                            labels);
     case ClusterAlgorithm::RLECCL:
       return rleCCL(params.nx, params.ny, params.nz, occupancy, visited, labels);
-    case ClusterAlgorithm::OctreeCCL:
-      return octreeCCL(params.nx, params.ny, params.nz,
-                       params.octreeLeafSize > 0 ? params.octreeLeafSize : 8, occupancy,
-                       visited, labels);
+    case ClusterAlgorithm::RLECCLOptimized:
+      return rleCCLOptimized(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::VCCS:
       // Use params.eps as seed spacing in voxels (default 3.0)
       return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
+    case ClusterAlgorithm::VCCSOptimized:
+      return vccsOptimized(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
   }
   throw std::runtime_error("Unhandled algorithm type");
 }
@@ -715,69 +716,6 @@ ClusterResult kmeans(
   return result;
 }
 
-// Simplified spectral clustering (without eigendecomposition)
-ClusterResult spectral(
-    int nx, int ny, int nz,
-    int k,
-    const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
-
-  ScopedTimer timer;
-  ClusterResult result;
-
-  std::fill(visited.begin(), visited.end(), 0);
-
-  // Collect occupied points
-  std::vector<Point> points;
-  for (int i = 0; i < nx; ++i) {
-    for (int j = 0; j < ny; ++j) {
-      for (int kk = 0; kk < nz; ++kk) {
-        std::size_t idx = idx3(i, j, kk, ny, nz);
-        if (occupancy[idx] == 1) {
-          points.push_back({i, j, kk});
-        }
-      }
-    }
-  }
-
-  int numPoints = static_cast<int>(points.size());
-  if (numPoints == 0) {
-    result.elapsedMs = timer.elapsedMilliseconds();
-    return result;
-  }
-
-  k = std::min(k, numPoints);
-
-  // Simplified: just assign points to clusters based on index modulo k
-  // (since we don't have eigendecomposition library, keeping it pure)
-  std::vector<int> labels(numPoints);
-  for (int i = 0; i < numPoints; ++i) {
-    labels[i] = i % k;
-  }
-
-  // Count cluster sizes
-  std::vector<int> clusterSizeMap(k, 0);
-  for (int p = 0; p < numPoints; ++p) {
-    clusterSizeMap[labels[p]]++;
-
-    std::size_t occIdx = idx3(points[p].i, points[p].j, points[p].k, ny, nz);
-    visited[occIdx] = 1;
-    result.visitedVoxels++;
-  }
-
-  for (int kk = 0; kk < k; ++kk) {
-    if (clusterSizeMap[kk] > 0) {
-      result.nclusters++;
-      result.clusterSizes.push_back(clusterSizeMap[kk]);
-      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[kk]);
-    }
-  }
-
-  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
-  result.elapsedMs = timer.elapsedMilliseconds();
-  return result;
-}
-
 // GCBD (Grid-based Connectivity using Union-Find)
 ClusterResult gcbd(
     int nx, int ny, int nz,
@@ -1127,8 +1065,32 @@ ClusterResult cc3d(
   return result;
 }
 
-// CC3D Optimized - Uses path compression and union-by-rank
-// For reference comparison only (not for fair benchmarking against BLS)
+// ── CC3D, optimized track ────────────────────────────────────────────────────
+//
+// The method as it is actually deployed, rather than the textbook form the
+// fair track holds to. Two changes, both of which matter here:
+//
+// 1. SAUF (Scan plus Array-based Union-Find, Wu/Otoo/Suzuki 2005): a two-pass
+//    raster scan in which each voxel consults only its ALREADY-SCANNED
+//    neighbours -- three of the six in 6-connectivity -- and takes an existing
+//    provisional label instead of creating and then merging one. The fair
+//    track instead probes all six neighbours of every occupied voxel and
+//    unions in both directions, doing every merge twice.
+//
+// 2. Every auxiliary array is sized to the number of OCCUPIED voxels, not to
+//    the grid volume. This is the change that dominates on E1-like data.
+//    Task 11 measured the fair cc3d at 81 ms on a completely EMPTY 23.72M-voxel
+//    grid -- no occupied voxels, so no clustering work whatsoever -- because it
+//    allocates and initialises `parent` and `clusterSizeMap` at grid size. The
+//    previous "optimized" variant added a third grid-sized array (`rank`) and
+//    was consequently 21-24% SLOWER than the fair one at -O3, which is what
+//    manuscript Table 2 reports. Union-find asymptotics were never the problem.
+//
+// No array here is sized to the grid volume. The backward stencil reaches at
+// most one plane back in i, so the scan carries a rolling TWO-PLANE buffer of
+// provisional labels (2*ny*nz ints, 660 KB at E1 size against 95 MB for a full
+// grid) and records each occupied voxel's provisional label into a compact list
+// as it goes, so the resolve pass never needs to address by coordinate again.
 ClusterResult cc3dOptimized(
     int nx, int ny, int nz,
     int connectivity,
@@ -1139,105 +1101,116 @@ ClusterResult cc3dOptimized(
   ScopedTimer timer;
   ClusterResult result;
 
-  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  const std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
   initLabels(labels, totalSize);
 
-  // 26-connectivity deltas (includes 6-connectivity as subset)
-  constexpr int deltas26[26][3] = {
-      // Face neighbors (6-connectivity)
-      {-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1},
-      // Edge neighbors
-      {-1, -1, 0}, {-1, 1, 0}, {1, -1, 0}, {1, 1, 0},
-      {-1, 0, -1}, {-1, 0, 1}, {1, 0, -1}, {1, 0, 1},
-      {0, -1, -1}, {0, -1, 1}, {0, 1, -1}, {0, 1, 1},
-      // Corner neighbors
-      {-1, -1, -1}, {-1, -1, 1}, {-1, 1, -1}, {-1, 1, 1},
-      {1, -1, -1}, {1, -1, 1}, {1, 1, -1}, {1, 1, 1}
-  };
+  // Rolling provisional-label planes: `prevPlane` is i-1, `currPlane` is i.
+  // 0 means "no label". This is the whole of the coordinate-addressed state.
+  const std::size_t planeYZ = static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz);
+  std::vector<int> prevPlane(planeYZ, 0);
+  std::vector<int> currPlane(planeYZ, 0);
 
-  int numNeighbors = (connectivity == 26) ? 26 : 6;
+  // Union-find over PROVISIONAL LABELS, not voxels, so its size tracks
+  // occupancy rather than volume. Index 0 is reserved as "no label".
+  std::vector<int> parent;
+  parent.reserve(1024);
+  parent.push_back(0);
 
-  // Union-Find structure WITH path compression and union-by-rank
-  std::vector<int> parent(totalSize);
-  std::vector<int> rank(totalSize, 0);
-
-  for (std::size_t i = 0; i < totalSize; ++i) {
-    parent[i] = static_cast<int>(i);
-  }
-
-  auto find = [&](int x) {
+  auto find = [&parent](int x) {
     while (parent[x] != x) {
-      parent[x] = parent[parent[x]];  // Path compression
+      parent[x] = parent[parent[x]];  // path halving
       x = parent[x];
     }
     return x;
   };
-
-  auto unite = [&](int x, int y) {
-    int rootX = find(x);
-    int rootY = find(y);
-    if (rootX != rootY) {
-      // Union by rank
-      if (rank[rootX] < rank[rootY]) {
-        parent[rootX] = rootY;
-      } else if (rank[rootX] > rank[rootY]) {
-        parent[rootY] = rootX;
-      } else {
-        parent[rootY] = rootX;
-        rank[rootX]++;
-      }
-    }
+  auto unite = [&](int a, int b) {
+    a = find(a); b = find(b);
+    if (a == b) return;
+    if (a < b) parent[b] = a; else parent[a] = b;  // keep the smaller root
   };
 
-  // Build connectivity
+  // Occupied voxels and their provisional labels, in raster order. Sized to
+  // occupancy; this is what the resolve pass walks instead of the grid.
+  std::vector<int> occIdx, occLab;
+
+  // Backward neighbour offsets: those already visited under an (i,j,k) raster
+  // order. Three for 6-connectivity, thirteen for 26 -- exactly half of each
+  // stencil, which is the whole point of the scan order. None reaches further
+  // back than i-1, which is what makes the two-plane buffer sufficient.
+  constexpr int back6[3][3] = {{-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+  constexpr int back26[13][3] = {
+      {-1, 0, 0}, {0, -1, 0}, {0, 0, -1},
+      {-1, -1, 0}, {-1, 1, 0}, {-1, 0, -1}, {-1, 0, 1},
+      {0, -1, -1}, {0, -1, 1},
+      {-1, -1, -1}, {-1, -1, 1}, {-1, 1, -1}, {-1, 1, 1}};
+  const int (*back)[3] = (connectivity == 26) ? back26 : back6;
+  const int numBack   = (connectivity == 26) ? 13 : 3;
+
+  // Pass 1: assign provisional labels, recording equivalences.
   for (int i = 0; i < nx; ++i) {
+    std::fill(currPlane.begin(), currPlane.end(), 0);
     for (int j = 0; j < ny; ++j) {
       for (int k = 0; k < nz; ++k) {
-        std::size_t idx = idx3(i, j, k, ny, nz);
+        const std::size_t idx = idx3(i, j, k, ny, nz);
         if (occupancy[idx] != 1) continue;
 
-        for (int d = 0; d < numNeighbors; ++d) {
-          int ni = i + deltas26[d][0];
-          int nj = j + deltas26[d][1];
-          int nk = k + deltas26[d][2];
-          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
-            std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
-            if (occupancy[nIdx] == 1) {
-              unite(static_cast<int>(idx), static_cast<int>(nIdx));
-            }
-          }
+        int lab = 0;
+        for (int d = 0; d < numBack; ++d) {
+          const int ni = i + back[d][0];
+          const int nj = j + back[d][1];
+          const int nk = k + back[d][2];
+          if (ni < 0 || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
+          const std::size_t off = static_cast<std::size_t>(nj) * static_cast<std::size_t>(nz) +
+                                  static_cast<std::size_t>(nk);
+          const int nl = (ni == i) ? currPlane[off] : prevPlane[off];
+          if (nl == 0) continue;
+          if (lab == 0) lab = nl;
+          else          unite(lab, nl);
         }
+        if (lab == 0) {                       // no labelled backward neighbour
+          lab = static_cast<int>(parent.size());
+          parent.push_back(lab);              // new provisional label
+        }
+        currPlane[static_cast<std::size_t>(j) * static_cast<std::size_t>(nz) +
+                  static_cast<std::size_t>(k)] = lab;
+        occIdx.push_back(static_cast<int>(idx));
+        occLab.push_back(lab);
       }
     }
+    std::swap(prevPlane, currPlane);
   }
 
-  // Count clusters
-  std::vector<int> clusterSizeMap(totalSize, 0);
-  for (int i = 0; i < nx; ++i) {
-    for (int j = 0; j < ny; ++j) {
-      for (int k = 0; k < nz; ++k) {
-        std::size_t idx = idx3(i, j, k, ny, nz);
-        if (occupancy[idx] == 1) {
-          int root = find(static_cast<int>(idx));
-          clusterSizeMap[root]++;
-          if (labels) (*labels)[idx] = root;
-          visited[idx] = 1;
-          result.visitedVoxels++;
-        }
-      }
+  // Pass 2: resolve equivalences to dense ids and tally, walking the compact
+  // occupied list. Ids are handed out in order of first appearance, which is
+  // raster order -- exactly what compactLabels() would produce.
+  std::vector<int> finalId(parent.size(), -1);
+  std::vector<int> sizes;
+  sizes.reserve(parent.size());
+
+  for (std::size_t n = 0; n < occIdx.size(); ++n) {
+    const int root = find(occLab[n]);
+    int id = finalId[static_cast<std::size_t>(root)];
+    if (id < 0) {
+      id = static_cast<int>(sizes.size());
+      finalId[static_cast<std::size_t>(root)] = id;
+      sizes.push_back(0);
     }
+    ++sizes[static_cast<std::size_t>(id)];
+    const std::size_t idx = static_cast<std::size_t>(occIdx[n]);
+    if (labels) (*labels)[idx] = id;
+    visited[idx] = 1;
+    result.visitedVoxels++;
   }
 
-  for (std::size_t i = 0; i < totalSize; ++i) {
-    if (clusterSizeMap[i] > 0) {
-      result.nclusters++;
-      result.clusterSizes.push_back(clusterSizeMap[i]);
-      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
-    }
+  result.nclusters = static_cast<int>(sizes.size());
+  for (int s : sizes) {
+    result.clusterSizes.push_back(s);
+    result.maxCluster = std::max(result.maxCluster, s);
   }
 
-  compactLabels(labels);
+  // Labels are already dense and assigned in order of first appearance, which
+  // is exactly what compactLabels() would produce, so it is not called here.
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -1399,147 +1372,37 @@ ClusterResult rleCCL(
 }
 
 
-// ── Octree-based CCL ─────────────────────────────────────────────────────────
+
+// ── RLE-CCL, optimized track ─────────────────────────────────────────────────
 //
-// Hierarchical 3D grid subdivision.
-// Empty octants are detected early and skipped entirely (O(1) per empty octant).
-// At leaf level, local 6-connectivity is resolved via union-find.
-// After each recursive split, cross-boundary connections at the three midplanes
-// are added by scanning the shared face rows.
+// He, Chao, Suzuki & Wu, "A Run-Based Two-Scan Labeling Algorithm",
+// IEEE Trans. Image Processing 17(5), 2008 -- the paper the fair track already
+// cites but does not follow.
 //
-// Shares BLS's "skip empty space" philosophy, but uses a different strategy:
-// crystallographic lattice (BLS) vs. regular octree subdivision (here).
-
-namespace {
-
-// Forward declaration of octree recursive helper
-static void octreeRecurse(
+// Three things separate this from the fair track, all of them the point of RLE:
+//
+// 1. RUNS, not voxels, are the union-find domain. The fair track builds runs
+//    and then unions every voxel inside each run to the run's representative
+//    (Algorithms.cpp, rleCCL, "Extend existing run"), which is precisely the
+//    work run-length encoding exists to avoid: a run of length L costs L-1
+//    unions there and zero here. The union-find array is sized to the number of
+//    runs, which on E1-like data is a few thousand against 23.7M voxels.
+//
+// 2. Rows are iterated sparsely. The fair track's inner loop visits every k in
+//    [0,nz) for every (i,j) -- a full O(NX*NY*NZ) sweep -- and then sweeps the
+//    grid twice more to count. Here the row scan is the only pass over the
+//    occupancy array, and the counting pass walks the run table.
+//
+// 3. Adjacency between runs is resolved by the two-pointer merge of sorted run
+//    lists (as in the fair track) but applied to run ids, so a merge costs one
+//    union per overlapping PAIR rather than one per shared voxel.
+//
+// Output is identical to the fair track by construction: both compute the
+// 6-connected components of the same occupancy, and connectivity of a run to
+// its neighbours is unchanged by whether its interior was unioned voxel by
+// voxel.
+ClusterResult rleCCLOptimized(
     int nx, int ny, int nz,
-    const std::vector<uint8_t>& occupancy,
-    std::vector<int>& parent,
-    std::vector<int>& ufRank,
-    int leafSize,
-    int x0, int y0, int z0,
-    int x1, int y1, int z1);
-
-static int octreeFind(std::vector<int>& parent, int x) {
-  while (parent[x] != x) {
-    parent[x] = parent[parent[x]];
-    x = parent[x];
-  }
-  return x;
-}
-
-static void octreeUnite(std::vector<int>& parent, std::vector<int>& ufRank,
-                         int a, int b) {
-  a = octreeFind(parent, a);
-  b = octreeFind(parent, b);
-  if (a == b) return;
-  if (ufRank[a] < ufRank[b]) std::swap(a, b);
-  parent[b] = a;
-  if (ufRank[a] == ufRank[b]) ufRank[a]++;
-}
-
-static void octreeRecurse(
-    int nx, int ny, int nz,
-    const std::vector<uint8_t>& occupancy,
-    std::vector<int>& parent,
-    std::vector<int>& ufRank,
-    int leafSize,
-    int x0, int y0, int z0,
-    int x1, int y1, int z1) {
-
-  int dx = x1 - x0;
-  int dy = y1 - y0;
-  int dz = z1 - z0;
-  if (dx <= 0 || dy <= 0 || dz <= 0) return;
-
-  // Early termination: check if octant contains any occupied voxel
-  bool hasOccupied = false;
-  for (int i = x0; i < x1 && !hasOccupied; ++i)
-    for (int j = y0; j < y1 && !hasOccupied; ++j)
-      for (int k = z0; k < z1 && !hasOccupied; ++k)
-        if (occupancy[idx3(i, j, k, ny, nz)] == 1) hasOccupied = true;
-
-  if (!hasOccupied) return;
-
-  // Leaf: connect all 6-neighbors within this sub-cube
-  if (dx <= leafSize && dy <= leafSize && dz <= leafSize) {
-    for (int i = x0; i < x1; ++i)
-      for (int j = y0; j < y1; ++j)
-        for (int k = z0; k < z1; ++k) {
-          std::size_t idx = idx3(i, j, k, ny, nz);
-          if (occupancy[idx] != 1) continue;
-          for (int d = 0; d < 6; ++d) {
-            int ni = i + deltas6[d][0];
-            int nj = j + deltas6[d][1];
-            int nk = k + deltas6[d][2];
-            // Only connect within this leaf's bounds
-            if (ni >= x0 && ni < x1 && nj >= y0 && nj < y1 && nk >= z0 && nk < z1) {
-              std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
-              if (occupancy[nIdx] == 1)
-                octreeUnite(parent, ufRank, static_cast<int>(idx),
-                             static_cast<int>(nIdx));
-            }
-          }
-        }
-    return;
-  }
-
-  // Split into up to 8 octants at the midpoint of each dimension
-  int mx = (dx > 1) ? (x0 + x1) / 2 : x1;
-  int my = (dy > 1) ? (y0 + y1) / 2 : y1;
-  int mz = (dz > 1) ? (z0 + z1) / 2 : z1;
-
-  // Recurse into 8 children (some may be empty — handled by hasOccupied check above)
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, y0, z0, mx, my, mz);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, y0, mz, mx, my, z1);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, my, z0, mx, y1, mz);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, x0, my, mz, mx, y1, z1);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, y0, z0, x1, my, mz);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, y0, mz, x1, my, z1);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, my, z0, x1, y1, mz);
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize, mx, my, mz, x1, y1, z1);
-
-  // Merge across X midplane (mx-1 | mx)
-  if (mx > x0 && mx < x1) {
-    for (int j = y0; j < y1; ++j)
-      for (int k = z0; k < z1; ++k) {
-        std::size_t i1 = idx3(mx - 1, j, k, ny, nz);
-        std::size_t i2 = idx3(mx,     j, k, ny, nz);
-        if (occupancy[i1] == 1 && occupancy[i2] == 1)
-          octreeUnite(parent, ufRank, static_cast<int>(i1), static_cast<int>(i2));
-      }
-  }
-
-  // Merge across Y midplane (my-1 | my)
-  if (my > y0 && my < y1) {
-    for (int i = x0; i < x1; ++i)
-      for (int k = z0; k < z1; ++k) {
-        std::size_t i1 = idx3(i, my - 1, k, ny, nz);
-        std::size_t i2 = idx3(i, my,     k, ny, nz);
-        if (occupancy[i1] == 1 && occupancy[i2] == 1)
-          octreeUnite(parent, ufRank, static_cast<int>(i1), static_cast<int>(i2));
-      }
-  }
-
-  // Merge across Z midplane (mz-1 | mz)
-  if (mz > z0 && mz < z1) {
-    for (int i = x0; i < x1; ++i)
-      for (int j = y0; j < y1; ++j) {
-        std::size_t i1 = idx3(i, j, mz - 1, ny, nz);
-        std::size_t i2 = idx3(i, j, mz,     ny, nz);
-        if (occupancy[i1] == 1 && occupancy[i2] == 1)
-          octreeUnite(parent, ufRank, static_cast<int>(i1), static_cast<int>(i2));
-      }
-  }
-}
-
-}  // anonymous namespace (extended)
-
-ClusterResult octreeCCL(
-    int nx, int ny, int nz,
-    int leafSize,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
     std::vector<int>* labels) {
@@ -1547,49 +1410,111 @@ ClusterResult octreeCCL(
   ScopedTimer timer;
   ClusterResult result;
 
-  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  const std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
   initLabels(labels, totalSize);
 
-  if (leafSize <= 0) leafSize = 8;
+  // Run table. Sized to the number of runs, which is data-dependent.
+  struct Run { int i, j, kStart, kEnd; };
+  std::vector<Run> runs;
+  runs.reserve(1024);
 
-  std::vector<int> parent(totalSize);
-  std::vector<int> ufRank(totalSize, 0);
-  for (std::size_t i = 0; i < totalSize; ++i) parent[i] = static_cast<int>(i);
+  // Union-find over RUN IDS.
+  std::vector<int> parent;
+  parent.reserve(1024);
+  auto find = [&parent](int x) {
+    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  };
+  auto unite = [&](int a, int b) {
+    a = find(a); b = find(b);
+    if (a == b) return;
+    if (a < b) parent[b] = a; else parent[a] = b;
+  };
 
-  // Recursive octree processing
-  octreeRecurse(nx, ny, nz, occupancy, parent, ufRank, leafSize,
-                0, 0, 0, nx, ny, nz);
+  // Run ids for the current and previous row within a slice, and for the whole
+  // previous slice. Runs in each list are ordered by kStart, which the scan
+  // produces for free and the two-pointer merge below relies on.
+  std::vector<std::vector<int>> prevSlice(ny), currSlice(ny);
 
-  // Count clusters
-  std::vector<int> clusterSizeMap(totalSize, 0);
-  for (int i = 0; i < nx; ++i)
-    for (int j = 0; j < ny; ++j)
-      for (int k = 0; k < nz; ++k) {
-        std::size_t idx = idx3(i, j, k, ny, nz);
-        if (occupancy[idx] == 1) {
-          int root = octreeFind(parent, static_cast<int>(idx));
-          clusterSizeMap[root]++;
-          if (labels) (*labels)[idx] = root;
-          visited[idx] = 1;
-          result.visitedVoxels++;
+  // Two-pointer merge of two kStart-sorted run lists: one union per overlapping
+  // pair. Runs overlap when their k-ranges share at least one position.
+  auto mergeRuns = [&](const std::vector<int>& A, const std::vector<int>& B) {
+    std::size_t ai = 0, bi = 0;
+    while (ai < A.size() && bi < B.size()) {
+      const Run& ra = runs[static_cast<std::size_t>(A[ai])];
+      const Run& rb = runs[static_cast<std::size_t>(B[bi])];
+      if (ra.kEnd < rb.kStart) { ++ai; continue; }
+      if (rb.kEnd < ra.kStart) { ++bi; continue; }
+      unite(A[ai], B[bi]);
+      if (ra.kEnd <= rb.kEnd) ++ai; else ++bi;
+    }
+  };
+
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < ny; ++j) {
+      currSlice[j].clear();
+
+      // The single pass over the occupancy array. Runs are emitted whole; no
+      // per-voxel union-find operation happens anywhere in this function.
+      const std::size_t rowBase = idx3(i, j, 0, ny, nz);
+      int kStart = -1;
+      for (int k = 0; k <= nz; ++k) {
+        const bool occ = (k < nz) && (occupancy[rowBase + static_cast<std::size_t>(k)] == 1);
+        if (occ) {
+          if (kStart < 0) kStart = k;
+        } else if (kStart >= 0) {
+          const int id = static_cast<int>(runs.size());
+          runs.push_back(Run{i, j, kStart, k - 1});
+          parent.push_back(id);
+          currSlice[j].push_back(id);
+          kStart = -1;
         }
       }
 
-  for (std::size_t i = 0; i < totalSize; ++i) {
-    if (clusterSizeMap[i] > 0) {
-      result.nclusters++;
-      result.clusterSizes.push_back(clusterSizeMap[i]);
-      result.maxCluster = std::max(result.maxCluster, clusterSizeMap[i]);
+      if (j > 0 && !currSlice[j - 1].empty()) mergeRuns(currSlice[j - 1], currSlice[j]);
+      if (i > 0 && !prevSlice[j].empty())     mergeRuns(prevSlice[j],     currSlice[j]);
     }
+    std::swap(prevSlice, currSlice);
   }
 
-  compactLabels(labels);
+  // Tally over the RUN TABLE, not the grid. Dense ids are assigned in order of
+  // first appearance scanning runs in creation order, which is raster order, so
+  // this matches what the fair track's compactLabels() produces.
+  std::vector<int> finalId(runs.size(), -1);
+  std::vector<int> sizes;
+  sizes.reserve(runs.size());
+
+  for (std::size_t r = 0; r < runs.size(); ++r) {
+    const int root = find(static_cast<int>(r));
+    int id = finalId[static_cast<std::size_t>(root)];
+    if (id < 0) {
+      id = static_cast<int>(sizes.size());
+      finalId[static_cast<std::size_t>(root)] = id;
+      sizes.push_back(0);
+    }
+    const Run& run = runs[r];
+    const int len = run.kEnd - run.kStart + 1;
+    sizes[static_cast<std::size_t>(id)] += len;
+    const std::size_t base = idx3(run.i, run.j, 0, ny, nz);
+    for (int k = run.kStart; k <= run.kEnd; ++k) {
+      const std::size_t idx = base + static_cast<std::size_t>(k);
+      if (labels) (*labels)[idx] = id;
+      visited[idx] = 1;
+    }
+    result.visitedVoxels += static_cast<std::size_t>(len);
+  }
+
+  result.nclusters = static_cast<int>(sizes.size());
+  for (int sz : sizes) {
+    result.clusterSizes.push_back(sz);
+    result.maxCluster = std::max(result.maxCluster, sz);
+  }
+
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
 }
-
 
 // ── VCCS — Voxel Cloud Connected Segmentation ─────────────────────────────────
 //
@@ -1765,6 +1690,242 @@ ClusterResult vccs(
       result.nclusters++;
       result.clusterSizes.push_back(clusterSizes[c]);
       result.maxCluster = std::max(result.maxCluster, clusterSizes[c]);
+    }
+  }
+
+  std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
+  result.elapsedMs = timer.elapsedMilliseconds();
+  return result;
+}
+
+
+// ── VCCS, optimized track ────────────────────────────────────────────────────
+//
+// The supervoxel core of pcl::SupervoxelClustering (Papon, Abramov, Schoeler &
+// Woergoetter, "Voxel Cloud Connectivity Segmentation - Supervoxels for Point
+// Clouds", CVPR 2013), PORTED rather than linked. BSD-3-Clause, so unlike the
+// cc3d question there is no licence obstacle to either route; the port was
+// chosen because PCL 1.14 pulls in Boost, Eigen, FLANN and VTK for one
+// comparison algorithm, this build currently has no mandatory external
+// dependency at all, and PCL's entry point takes a PointCloud<PointXYZRGBA>
+// with estimated normals -- the adapter from a binary voxel grid would be more
+// code than the algorithm.
+//
+// What the published method adds over the fair track, and what is implemented
+// here:
+//
+//   1. ADAPTIVE SEEDING. The fair track takes the voxel at the centre of each
+//      seed cell and drops the seed entirely if that one voxel happens to be
+//      empty (Algorithms.cpp, vccs, "if (occupancy[seedIdx] == 1 ...)"). Here
+//      each seed cell is searched and the seed is placed on the occupied voxel
+//      NEAREST the cell centre, so a cell containing structure always seeds.
+//
+//   2. SEED PRUNING. Papon et al. reject seeds in sparse neighbourhoods, since
+//      a seed on an isolated speck produces a supervoxel that is noise rather
+//      than structure. A candidate is kept only if the occupied count within
+//      Rsearch = S/2 reaches a fraction of what a filled ball would hold.
+//
+//   3. NO GRID-SIZED ALLOCATION. The fair track allocates `assignment` at grid
+//      volume (95 MB at E1 size). Here the occupied voxels are collected once
+//      into a raster-ordered list and everything -- assignment, seeds, the
+//      priority queue -- is indexed by position in that list. Voxel index to
+//      list position is a binary search over ~21k entries, ~15 comparisons,
+//      against ~126k neighbour lookups on E1; that trade buys the removal of
+//      every grid-sized array.
+//
+// DELIBERATELY NOT PORTED: the colour and normal terms of PCL's feature
+// distance D = sqrt(lambda*Dc^2/m^2 + mu*Ds^2/(3R^2) + epsilon*Dn^2). On a
+// binary voxel grid there is no colour, and a surface normal is not defined for
+// an occupancy indicator -- every voxel is identical apart from its position.
+// Only the spatial term Ds carries information, so the distance here is bare
+// Euclidean, as it already is in the fair track. Including a colour term over
+// constant colour, or a normal term over normals estimated from the occupancy
+// itself, would add cost and arbitrary weights without adding information.
+// Also not ported: PCL's octree adjacency graph, which exists to give
+// neighbour queries on an unstructured cloud and is redundant on a regular
+// grid where the six neighbours are an index arithmetic away.
+ClusterResult vccsOptimized(
+    int nx, int ny, int nz,
+    double seedResolution,
+    const std::vector<uint8_t>& occupancy,
+    std::vector<uint8_t>& visited) {
+
+  ScopedTimer timer;
+  ClusterResult result;
+
+  const std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  std::fill(visited.begin(), visited.end(), 0);
+
+  const int S = std::max(1, static_cast<int>(std::round(seedResolution)));
+
+  // The one pass over the occupancy array. Raster order, so `occVox` comes out
+  // sorted and can be binary-searched without an explicit sort.
+  std::vector<int> occVox;
+  for (std::size_t i = 0; i < totalSize; ++i) {
+    if (occupancy[i] == 1) occVox.push_back(static_cast<int>(i));
+  }
+  const int nOcc = static_cast<int>(occVox.size());
+  if (nOcc == 0) {
+    result.elapsedMs = timer.elapsedMilliseconds();
+    return result;
+  }
+
+  auto compactOf = [&occVox](int voxIdx) -> int {
+    auto it = std::lower_bound(occVox.begin(), occVox.end(), voxIdx);
+    if (it == occVox.end() || *it != voxIdx) return -1;
+    return static_cast<int>(it - occVox.begin());
+  };
+  const int planeYZ = ny * nz;
+  auto decode = [&](int voxIdx, int& i, int& j, int& k) {
+    i = voxIdx / planeYZ;
+    const int rem = voxIdx - i * planeYZ;
+    j = rem / nz;
+    k = rem % nz;
+  };
+
+  std::vector<int> assignment(static_cast<std::size_t>(nOcc), -1);
+
+  // --- 1. adaptive seeding -------------------------------------------------
+  // Bucket occupied voxels by seed cell, then keep the one nearest the cell
+  // centre. Iterating occupied voxels rather than cells keeps this O(nOcc).
+  struct Cand { int best = -1; double bestD2 = 0.0; };
+  std::unordered_map<long long, Cand> cells;
+  cells.reserve(static_cast<std::size_t>(nOcc));
+  const int halfS = S / 2;
+  for (int c = 0; c < nOcc; ++c) {
+    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
+    const int ci = (i - halfS >= 0) ? (i - halfS) / S : -1 - ((halfS - i - 1) / S);
+    const int cj = (j - halfS >= 0) ? (j - halfS) / S : -1 - ((halfS - j - 1) / S);
+    const int ck = (k - halfS >= 0) ? (k - halfS) / S : -1 - ((halfS - k - 1) / S);
+    const double cx = halfS + static_cast<double>(ci) * S;
+    const double cy = halfS + static_cast<double>(cj) * S;
+    const double cz = halfS + static_cast<double>(ck) * S;
+    const double d2 = (i - cx) * (i - cx) + (j - cy) * (j - cy) + (k - cz) * (k - cz);
+    const long long key = ((static_cast<long long>(ci) * 73856093LL) ^
+                           (static_cast<long long>(cj) * 19349663LL) ^
+                           (static_cast<long long>(ck) * 83492791LL));
+    auto it = cells.find(key);
+    if (it == cells.end()) cells.emplace(key, Cand{c, d2});
+    else if (d2 < it->second.bestD2) { it->second.best = c; it->second.bestD2 = d2; }
+  }
+
+  // --- 2. seed pruning -----------------------------------------------------
+  // Reject a candidate whose neighbourhood within Rsearch = S/2 is too sparse
+  // to represent structure. The 0.05 fraction of a filled ball is PCL's.
+  const double rSearch = 0.5 * S;
+  const double ballVolume = (4.0 / 3.0) * 3.14159265358979323846 * rSearch * rSearch * rSearch;
+  const int minPoints = std::max(1, static_cast<int>(0.05 * ballVolume));
+  const int r = static_cast<int>(std::floor(rSearch));
+
+  std::vector<int> seeds;
+  seeds.reserve(cells.size());
+  for (const auto& kv : cells) {
+    const int c = kv.second.best;
+    if (c < 0) continue;
+    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
+    int neighbours = 0;
+    for (int di = -r; di <= r; ++di)
+      for (int dj = -r; dj <= r; ++dj)
+        for (int dk = -r; dk <= r; ++dk) {
+          if (di * di + dj * dj + dk * dk > r * r) continue;
+          const int ni = i + di, nj = j + dj, nk = k + dk;
+          if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
+          if (occupancy[idx3(ni, nj, nk, ny, nz)] == 1) ++neighbours;
+        }
+    if (neighbours >= minPoints) seeds.push_back(c);
+  }
+  // Seeds are keyed through an unordered_map, whose iteration order is not
+  // specified; sorting restores a deterministic cluster numbering.
+  std::sort(seeds.begin(), seeds.end());
+
+  // --- 3. flow-constrained expansion ---------------------------------------
+  struct PQEntry {
+    double dist; int compact; int clusterId; int si, sj, sk;
+    bool operator>(const PQEntry& o) const {
+      if (dist != o.dist) return dist > o.dist;
+      return compact > o.compact;   // deterministic tie-break
+    }
+  };
+  std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<PQEntry>> pq;
+
+  int clusterId = 0;
+  for (int c : seeds) {
+    if (assignment[static_cast<std::size_t>(c)] != -1) continue;
+    assignment[static_cast<std::size_t>(c)] = clusterId;
+    int si, sj, sk; decode(occVox[static_cast<std::size_t>(c)], si, sj, sk);
+    for (int d = 0; d < 6; ++d) {
+      const int ni = si + deltas6[d][0], nj = sj + deltas6[d][1], nk = sk + deltas6[d][2];
+      if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
+      const int nv = static_cast<int>(idx3(ni, nj, nk, ny, nz));
+      if (occupancy[static_cast<std::size_t>(nv)] != 1) continue;
+      const int nc = compactOf(nv);
+      if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
+      pq.push({1.0, nc, clusterId, si, sj, sk});
+    }
+    ++clusterId;
+  }
+
+  while (!pq.empty()) {
+    const PQEntry e = pq.top();
+    pq.pop();
+    if (assignment[static_cast<std::size_t>(e.compact)] != -1) continue;
+    assignment[static_cast<std::size_t>(e.compact)] = e.clusterId;
+    int i0, j0, k0; decode(occVox[static_cast<std::size_t>(e.compact)], i0, j0, k0);
+    for (int d = 0; d < 6; ++d) {
+      const int ni = i0 + deltas6[d][0], nj = j0 + deltas6[d][1], nk = k0 + deltas6[d][2];
+      if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
+      const int nv = static_cast<int>(idx3(ni, nj, nk, ny, nz));
+      if (occupancy[static_cast<std::size_t>(nv)] != 1) continue;
+      const int nc = compactOf(nv);
+      if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
+      const double dd = std::sqrt(static_cast<double>((ni - e.si) * (ni - e.si) +
+                                                      (nj - e.sj) * (nj - e.sj) +
+                                                      (nk - e.sk) * (nk - e.sk)));
+      pq.push({dd, nc, e.clusterId, e.si, e.sj, e.sk});
+    }
+  }
+
+  // Occupied voxels no surviving seed reached. PCL leaves these unlabelled; the
+  // fair track promotes each connected remainder to its own cluster, and that
+  // is kept here so the two tracks are tallied on the same terms -- a coverage
+  // gap shows up as extra clusters in both, not as missing voxels in one.
+  std::vector<int> stack;
+  for (int c = 0; c < nOcc; ++c) {
+    if (assignment[static_cast<std::size_t>(c)] != -1) continue;
+    assignment[static_cast<std::size_t>(c)] = clusterId;
+    stack.clear();
+    stack.push_back(c);
+    while (!stack.empty()) {
+      const int cur = stack.back();
+      stack.pop_back();
+      int i0, j0, k0; decode(occVox[static_cast<std::size_t>(cur)], i0, j0, k0);
+      for (int d = 0; d < 6; ++d) {
+        const int ni = i0 + deltas6[d][0], nj = j0 + deltas6[d][1], nk = k0 + deltas6[d][2];
+        if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
+        const int nv = static_cast<int>(idx3(ni, nj, nk, ny, nz));
+        if (occupancy[static_cast<std::size_t>(nv)] != 1) continue;
+        const int nc = compactOf(nv);
+        if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
+        assignment[static_cast<std::size_t>(nc)] = clusterId;
+        stack.push_back(nc);
+      }
+    }
+    ++clusterId;
+  }
+
+  std::vector<int> sizes(static_cast<std::size_t>(clusterId), 0);
+  for (int c = 0; c < nOcc; ++c) {
+    const int a = assignment[static_cast<std::size_t>(c)];
+    if (a < 0) continue;
+    ++sizes[static_cast<std::size_t>(a)];
+    visited[static_cast<std::size_t>(occVox[static_cast<std::size_t>(c)])] = 1;
+    result.visitedVoxels++;
+  }
+  for (int sz : sizes) {
+    if (sz > 0) {
+      result.nclusters++;
+      result.clusterSizes.push_back(sz);
+      result.maxCluster = std::max(result.maxCluster, sz);
     }
   }
 

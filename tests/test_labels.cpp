@@ -84,13 +84,13 @@ std::vector<Case> buildCases() {
 }
 
 const ClusterAlgorithm kLabelled[] = {
-    ClusterAlgorithm::TraditionalDFS, ClusterAlgorithm::CC3D, ClusterAlgorithm::CC3DOptimized,
-    ClusterAlgorithm::GCBD,           ClusterAlgorithm::RLECCL, ClusterAlgorithm::OctreeCCL};
+    ClusterAlgorithm::TraditionalDFS, ClusterAlgorithm::CC3D,    ClusterAlgorithm::CC3DOptimized,
+    ClusterAlgorithm::GCBD,           ClusterAlgorithm::RLECCL, ClusterAlgorithm::RLECCLOptimized};
 
 const ClusterAlgorithm kUnlabelled[] = {
     ClusterAlgorithm::SkipDFS, ClusterAlgorithm::DBSCAN,  ClusterAlgorithm::Hierarchical,
-    ClusterAlgorithm::KMeans,  ClusterAlgorithm::Spectral, ClusterAlgorithm::HDBSCAN,
-    ClusterAlgorithm::VCCS};
+    ClusterAlgorithm::KMeans,  ClusterAlgorithm::HDBSCAN,
+    ClusterAlgorithm::VCCS,    ClusterAlgorithm::VCCSOptimized};
 
 }  // namespace
 
@@ -101,7 +101,6 @@ int main() {
     ClusterParams params;
     params.nx = c.nx; params.ny = c.ny; params.nz = c.nz;
     params.connectivity = 6;
-    params.octreeLeafSize = 8;  // the shipped default, stated explicitly
 
     for (ClusterAlgorithm algo : kLabelled) {
       const std::string tag = c.name + "/" + bls::algorithmToString(algo);

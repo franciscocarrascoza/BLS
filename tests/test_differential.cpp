@@ -1,12 +1,13 @@
-// Task 4: differential testing of the six algorithms that claim exact labelling.
+// Task 4: differential testing of the algorithms that claim exact labelling.
 //
-// TraditionalDFS, CC3D, CC3DOptimized, GCBD, RLE-CCL and Octree-CCL all claim
-// to compute connected components exactly. If that is true they must agree with
-// each other on every input, and all six must agree with a straightforward
-// reference. Three of them -- RLE-CCL, Octree-CCL and VCCS -- were added
-// recently with no test coverage at all, and both are structurally clever
-// (run-merging, octree midplane stitching) in ways that make a merge-plus-split
-// error easy to introduce and invisible to a count-only comparison.
+// TraditionalDFS, CC3D, CC3DOptimized, GCBD, RLE-CCL and (since Task 12)
+// RLE-CCL-optimized all claim to compute connected components exactly. If that
+// is true they must agree with each other on every input, and all of them must
+// agree with a straightforward reference. Octree-CCL sat in this list until
+// Task 12 removed it. RLE-CCL and its optimized variant are structurally clever
+// (run-merging; runs rather than voxels as the union-find domain) in ways that
+// make a merge-plus-split error easy to introduce and invisible to a count-only
+// comparison.
 //
 // So this compares three things of increasing strength:
 //   1. component count
@@ -23,10 +24,10 @@
 // The PBC on/off axis originally planned for this task does not exist -- no
 // algorithm in this codebase has any periodic boundary handling -- and is
 // replaced by a connectivity sweep. Note that only cc3d and cc3dOptimized read
-// ClusterParams::connectivity; gcbd, rleCCL and octreeCCL hardcode
+// ClusterParams::connectivity; gcbd and both rleCCL variants hardcode
 // 6-connectivity and traditionalDFS hardcodes deltas6. At connectivity 26 the
-// six are therefore NOT computing the same thing, and diffing all six would
-// report five spurious failures. Only the two that honour the parameter are
+// group is therefore NOT computing the same thing, and diffing all of them
+// would report spurious failures. Only the two that honour the parameter are
 // compared there, against a 26-connected reference.
 
 #include <algorithm>
@@ -74,9 +75,9 @@ Grid3 makeGrid(int nx, int ny, int nz) {
 const int kD6[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
 
 // Independent reference: plain BFS over the occupancy grid. Deliberately the
-// dumbest correct implementation -- no union-find, no runs, no octree -- so it
-// shares no machinery, and therefore no potential misconception, with any of
-// the six under test.
+// dumbest correct implementation -- no union-find, no runs, no decision tree -- so it
+// shares no machinery, and therefore no potential misconception, with any
+// method under test.
 std::vector<int> referenceLabels(const Grid3& g, int connectivity) {
   std::vector<std::array<int, 3>> dirs;
   if (connectivity == 26) {
@@ -303,7 +304,7 @@ const Method kSix[] = {
     {ClusterAlgorithm::CC3DOptimized,  "cc3d_optimized"},
     {ClusterAlgorithm::GCBD,           "gcbd"},
     {ClusterAlgorithm::RLECCL,         "rle_ccl"},
-    {ClusterAlgorithm::OctreeCCL,      "octree_ccl"},
+    {ClusterAlgorithm::RLECCLOptimized,"rle_ccl_optimized"},
 };
 
 struct Tally {
@@ -317,7 +318,6 @@ std::vector<int> runOne(const Method& m, const Grid3& g, int connectivity, Clust
   ClusterParams p;
   p.nx = g.nx; p.ny = g.ny; p.nz = g.nz;
   p.connectivity = connectivity;
-  p.octreeLeafSize = 8;  // the shipped default, stated explicitly
   std::vector<uint8_t> visited(g.size(), 0);
   std::vector<int> labels;
   ClusterResult r = bls::runClusterAlgorithm(m.algo, p, g.occ, visited, &labels);

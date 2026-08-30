@@ -136,17 +136,18 @@ std::vector<Method> methods() {
       m(ClusterAlgorithm::CC3DOptimized, true),
       m(ClusterAlgorithm::GCBD, true),
       m(ClusterAlgorithm::RLECCL, true),
-      m(ClusterAlgorithm::OctreeCCL, true),
+      m(ClusterAlgorithm::RLECCLOptimized, true),
       m(ClusterAlgorithm::SkipDFS, false),
       m(ClusterAlgorithm::DBSCAN, false),
       m(ClusterAlgorithm::Hierarchical, false),
       m(ClusterAlgorithm::KMeans, false),   // .anchored set below
-      m(ClusterAlgorithm::Spectral, false),
+      m(ClusterAlgorithm::VCCSOptimized, false),
       m(ClusterAlgorithm::HDBSCAN, false),
       m(ClusterAlgorithm::VCCS, false),
   };
   for (auto& x : v) {
-    if (x.algo == ClusterAlgorithm::KMeans || x.algo == ClusterAlgorithm::VCCS) {
+    if (x.algo == ClusterAlgorithm::KMeans || x.algo == ClusterAlgorithm::VCCS ||
+        x.algo == ClusterAlgorithm::VCCSOptimized) {
       x.anchored = true;
     }
   }
@@ -193,7 +194,6 @@ Outcome run(const Method& m, const Grid3& g) {
   p.nx = g.nx; p.ny = g.ny; p.nz = g.nz;
   p.connectivity = 6;
   p.skipDfsJumpDistance = 1;
-  p.octreeLeafSize = 8;  // octree_ccl's shipped default, not skip_dfs's stride
   std::vector<uint8_t> visited(g.size(), 0);
   ClusterResult r = bls::runClusterAlgorithm(m.algo, p, g.occ, visited, nullptr);
   Outcome o;

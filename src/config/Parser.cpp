@@ -182,7 +182,7 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
       } else if (upperKeyword == "SKIP") {
         // Kept as the config spelling for backward compatibility with the 83
         // E0-E5 decks. It maps to the refinement stride and to nothing else --
-        // not to --algo-skip (skip_dfs) and not to the octree leaf size.
+        // not to --algo-skip, which belongs to cluster::skipDFS.
         config.refinementStride = std::stoi(rest);
       } else if (upperKeyword == "ALPHA") {
         config.alpha = std::stod(rest);
