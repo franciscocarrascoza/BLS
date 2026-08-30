@@ -32,6 +32,32 @@ unset(_bls_source_real)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Default to Release. Until Task 13 this was unset, which means CMake passes no
+# -O flag at all and GCC falls back to -O0 -- so every benchmark this project
+# published, including all E0-E5 timings, was produced by an unoptimised build
+# and nothing in the tree said so. The campaign runs at -O3; an empty build type
+# must not be reachable by accident again.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING
+      "Build type (Release, Debug, RelWithDebInfo, MinSizeRel)" FORCE)
+  message(STATUS "No build type specified; defaulting to Release.")
+endif()
+
+# Make the flags impossible to miss in the build log, and record them where the
+# campaign can capture them, so published numbers carry the flags that produced
+# them. scripts/_repo_env.sh reads this file into every experiment's provenance
+# header.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _bls_build_type_uc)
+set(_bls_effective_flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_bls_build_type_uc}}")
+string(STRIP "${_bls_effective_flags}" _bls_effective_flags)
+message(STATUS "BLS build type : ${CMAKE_BUILD_TYPE}")
+message(STATUS "BLS CXX flags  : ${_bls_effective_flags}")
+file(WRITE "${CMAKE_BINARY_DIR}/bls_build_info.txt"
+     "build_type=${CMAKE_BUILD_TYPE}\n"
+     "cxx_flags=${_bls_effective_flags}\n"
+     "cxx_compiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\n"
+     "source_dir=${CMAKE_SOURCE_DIR}\n")
+
 option(BLS_USE_XDRFILE "Enable XDRFILE support" OFF)
 option(BLS_USE_TNG "Enable TNG support" OFF)
 option(BLS_SANITIZE "Build with -fsanitize=address,undefined" OFF)

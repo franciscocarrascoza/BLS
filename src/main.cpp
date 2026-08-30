@@ -38,6 +38,7 @@ void printUsage() {
                "  --start N              Skip frames before index N\n"
                "  --stop N               Stop after frame index N (inclusive)\n"
                "  --threads N            Number of OpenMP threads (if enabled)\n"
+               "  --replicate N          Replicate ordinal, written to the CSV (default: 1)\n"
                "  --format F             Override molecular system format (xtc,trr,gro,pdb,xyz,mol,sdf)\n"
                "  --algo ALGORITHM       Clustering algorithm to use:\n"
                "                           bls (default) - Bravais Lattice Sampling\n"
@@ -139,16 +140,21 @@ std::vector<int> buildSelection(const BLSConfig& config, const Topology* topo, i
   return indices;
 }
 
+// `replicate` is APPENDED as column 16. The first fifteen columns keep their
+// order and meaning exactly -- the run scripts read nclusters and elapsed_ms by
+// position (cut -f12, -f15), so inserting anywhere but the end would silently
+// shift what those reads return.
 void writeCsvHeader(std::ostream& os) {
   os << "frame,time_ps,natoms,NX,NY,NZ,dNN_vox,lattice,centering,seeds,seed_hits,nclusters,"
-        "max_cluster,refined_voxels,elapsed_ms\n";
+        "max_cluster,refined_voxels,elapsed_ms,replicate\n";
 }
 
-void writeCsvRow(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber) {
+void writeCsvRow(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber,
+                 int replicate) {
   os << frameNumber << ',' << m.timePs << ',' << m.natoms << ',' << m.nx << ',' << m.ny << ','
      << m.nz << ',' << m.dnnVoxel << ',' << m.lattice << ',' << m.centering << ',' << m.seeds
      << ',' << m.seedHits << ',' << m.nclusters << ',' << m.maxCluster << ','
-     << m.refinedVoxels << ',' << m.elapsedMs << '\n';
+     << m.refinedVoxels << ',' << m.elapsedMs << ',' << replicate << '\n';
 }
 
 void writeJson(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber) {
@@ -223,6 +229,8 @@ int main(int argc, char** argv) {
         opts.startFrame = safeParseSize(requireArg(i, arg), arg);
       } else if (arg == "--stop") {
         opts.stopFrame = safeParseSize(requireArg(i, arg), arg);
+      } else if (arg == "--replicate") {
+        opts.replicate = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--threads") {
         opts.threads = safeParseInt(requireArg(i, arg), arg);
       } else if (arg == "--format") {
@@ -337,7 +345,7 @@ int main(int argc, char** argv) {
       return EXIT_FAILURE;
     }
     benchStream = benchFile.get();
-    *benchStream << "frame,cumulative_ms,peak_rss_bytes\n";
+    *benchStream << "frame,cumulative_ms,peak_rss_bytes,replicate\n";
   }
 
   writeCsvHeader(*csvStream);
@@ -561,7 +569,7 @@ int main(int argc, char** argv) {
 
     metrics.frameIndex = frameIndex;
 
-    writeCsvRow(*csvStream, metrics, frameIndex);
+    writeCsvRow(*csvStream, metrics, frameIndex, opts.replicate);
     if (jsonStream) {
       writeJson(*jsonStream, metrics, frameIndex);
     }
@@ -569,7 +577,8 @@ int main(int argc, char** argv) {
     cumulativeMs += metrics.elapsedMs;
     peakRss = std::max(peakRss, currentRSSBytes());
     if (benchStream) {
-      *benchStream << frameIndex << ',' << cumulativeMs << ',' << peakRss << '\n';
+      *benchStream << frameIndex << ',' << cumulativeMs << ',' << peakRss << ','
+                   << opts.replicate << '\n';
     }
 
     frames.push_back(metrics);

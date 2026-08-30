@@ -24,6 +24,9 @@ struct ProgramOptions {
   std::size_t stopFrame{std::numeric_limits<std::size_t>::max()};
   int threads{1};
   bool quiet{false};
+  // Replicate ordinal, emitted as the last CSV column so the campaign's repeats
+  // land in one file. Purely a label: it changes no computation.
+  int replicate{1};
   // Algorithm-specific parameters.
   //
   // One name per meaning, deliberately. Until Task 9 a single --algo-skip fed
