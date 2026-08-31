@@ -149,6 +149,12 @@ target_link_libraries(bls_probe_census PRIVATE bls_core)
 # the optimized track's pruning fires. See tools/vccs_probe.cpp.
 add_executable(bls_vccs_probe tools/vccs_probe.cpp)
 target_link_libraries(bls_vccs_probe PRIVATE bls_core)
+
+# Size-floor probe: per-component sizes from the DFS ground truth and whether
+# BLS found each one, which is the direct evidence for the exactness-above-a-
+# floor claim. See tools/sizefloor_probe.cpp.
+add_executable(bls_sizefloor tools/sizefloor_probe.cpp)
+target_link_libraries(bls_sizefloor PRIVATE bls_core)
 if(BLS_USE_XDRFILE)
   if(DEFINED _bls_xdr_rpath)
     set_target_properties(bls_core PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
