@@ -155,6 +155,11 @@ target_link_libraries(bls_vccs_probe PRIVATE bls_core)
 # floor claim. See tools/sizefloor_probe.cpp.
 add_executable(bls_sizefloor tools/sizefloor_probe.cpp)
 target_link_libraries(bls_sizefloor PRIVATE bls_core)
+
+# E7 probe: recall and timing for BLS/DFS at an arbitrary ALPHA and
+# GRID_SPACING, over the same origin-offset mechanism. See tools/e7_probe.cpp.
+add_executable(bls_e7 tools/e7_probe.cpp)
+target_link_libraries(bls_e7 PRIVATE bls_core)
 if(BLS_USE_XDRFILE)
   if(DEFINED _bls_xdr_rpath)
     set_target_properties(bls_core PROPERTIES BUILD_RPATH "${_bls_xdr_rpath}"
