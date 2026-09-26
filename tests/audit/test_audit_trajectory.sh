@@ -7,8 +7,12 @@
 #   TRJ-CNT   processed frame count == input frame count
 #   TRJ-BOX   per-frame box honoured: (a) BOX AUTO without CRYST1 -> each frame's own bounding box;
 #             (b) per-MODEL CRYST1 records with different cells -> each frame's own cell
-#   S-5       "all methods label the same grid" (§3.1 l.426-428): NX,NY,NZ identical across methods per frame
-#             (proxy for the grid fingerprint; an occupancy hash needs a code change — see STOP A fix plan)
+#   S-5       "all methods label the same grid" (§3.1 l.426-428): the grid fingerprint -- NX,NY,NZ, per-axis
+#             voxel edge h_x,h_y,h_z, origin, periodic flags and SHA-256 of the occupancy bits -- identical
+#             across all methods on every frame (fingerprint columns added by the audit, 2026-09-26)
+#   TRJ-ORIG  frames with equal grid dimensions but different origins (a translated copy) are each gridded
+#             at their own origin (pre-audit BLS re-used frame 1's box/origin whenever the dimensions matched)
+#   D12       BOX MANUAL is honoured by every method (Defect 12), BOX CELL takes each MODEL's CRYST1
 #
 # Usage: test_audit_trajectory.sh /path/to/bls_analyze
 set -uo pipefail
@@ -52,6 +56,9 @@ write("AAA.pdb", [A, A, A]); write("AB.pdb", [A, B]); write("BA.pdb", [B, A])
 write("A_cellsmall.pdb", [A], [(30.0, 30.0, 30.0)])
 write("A_cellbig.pdb", [A], [(44.0, 40.0, 36.0)])
 write("A_twocells.pdb", [A, A], [(30.0, 30.0, 30.0), (44.0, 40.0, 36.0)])
+# C = A translated by +1.0 A in x (half a voxel): same extents -> same grid dims, different origin
+C = [(x + 1.0, y + 0.3, z + 0.6) for (x, y, z) in A]
+write("C.pdb", [C]); write("AC.pdb", [A, C])
 EOF
 
 cat > "$WORK/deck.in" <<'EOF'
@@ -72,6 +79,9 @@ BLS ...
 ... BLS
 EOF
 
+sed -e 's/^  BOX AUTO/  BOX MANUAL XLO -5 XHI 45 YLO -5 YHI 45 ZLO -5 ZHI 45/' "$WORK/deck.in" > "$WORK/deck_manual.in"
+sed -e 's/^  BOX AUTO/  BOX CELL/' "$WORK/deck.in" > "$WORK/deck_cell.in"
+
 ALGOS=(bls traditional_dfs cc3d_optimized rle_ccl_optimized gcbd skip_dfs dbscan hierarchical kmeans vccs_optimized hdbscan)
 extra_args() {
   case "$1" in
@@ -80,10 +90,13 @@ extra_args() {
     *) echo "" ;;
   esac
 }
-run() {  # algo pdb out
+run() {  # algo pdb out [deck]
   # shellcheck disable=SC2046
-  "$BIN" --system "$WORK/$2" --format pdb --conf "$WORK/deck.in" --algo "$1" $(extra_args "$1") --quiet --out "$WORK/$3" 2>>"$WORK/stderr.log"
+  "$BIN" --system "$WORK/$2" --format pdb --conf "$WORK/${4:-deck.in}" --algo "$1" $(extra_args "$1") --quiet --out "$WORK/$3" 2>>"$WORK/stderr.log"
 }
+# grid fingerprint of frame n: NX,NY,NZ + h_x,h_y,h_z,origin_x,origin_y,origin_z,pbc,occ_sha256 (cols 4-6, 18-25).
+# Empty when the binary predates the fingerprint columns (then the S-5/TRJ-ORIG checks fail, as they should).
+fp() { awk -F, -v n="$2" 'NR==n+1 {if (NF>=25) print $4","$5","$6","$18","$19","$20","$21","$22","$23","$24","$25; else print ""}' "$WORK/$1"; }
 
 FAILS=0; CHECKS=0
 check() {  # claim ok message
@@ -96,7 +109,7 @@ check() {  # claim ok message
 row() { awk -F, -v n="$2" 'NR==n+1 {print $4","$5","$6","$10","$11","$12","$13","$14}' "$WORK/$1"; }
 nrows() { echo $(( $(wc -l < "$WORK/$1") - 1 )); }
 
-declare -A DIMS_A DIMS_B
+declare -A DIMS_A DIMS_B FP_A FP_B FP_MAN1 FP_MAN2 FP_CELL1 FP_CELL2
 for a in "${ALGOS[@]}"; do
   run "$a" A.pdb "${a}_A.csv"; run "$a" B.pdb "${a}_B.csv"
   run "$a" AAA.pdb "${a}_AAA.csv"; run "$a" AB.pdb "${a}_AB.csv"; run "$a" BA.pdb "${a}_BA.csv"
@@ -120,12 +133,32 @@ for a in "${ALGOS[@]}"; do
   check TRJ-BOX "$([[ "$t1" == "$cs" && "$t2" == "$cb" ]] && echo 1)" \
         "$a: per-MODEL CRYST1 not honoured (frame dims $t1 | $t2; single-cell runs $cs | $cb)"
   DIMS_A[$a]=$(echo "$rA" | cut -d, -f1-3); DIMS_B[$a]=$(echo "$rB" | cut -d, -f1-3)
+  # TRJ-ORIG: A then C (same dims, other origin) -> each frame equals its single-frame run, fingerprint included
+  run "$a" C.pdb "${a}_C.csv"; run "$a" AC.pdb "${a}_AC.csv"
+  check TRJ-ORIG "$([[ "$(row "${a}_AC.csv" 2)" == "$(row "${a}_C.csv" 1)" && -n "$(fp "${a}_C.csv" 1)" && \
+                       "$(fp "${a}_AC.csv" 2)" == "$(fp "${a}_C.csv" 1)" && "$(fp "${a}_AC.csv" 1)" == "$(fp "${a}_A.csv" 1)" ]] && echo 1)" \
+        "$a: frame 2 of A,C differs from single C (row $(row "${a}_AC.csv" 2) vs $(row "${a}_C.csv" 1); fp '$(fp "${a}_AC.csv" 2)' vs '$(fp "${a}_C.csv" 1)')"
+  # D12: BOX MANUAL and BOX CELL (per MODEL) through every method
+  run "$a" AB.pdb "${a}_man.csv" deck_manual.in; run "$a" A_twocells.pdb "${a}_cell.csv" deck_cell.in
+  FP_MAN1[$a]=$(fp "${a}_man.csv" 1); FP_MAN2[$a]=$(fp "${a}_man.csv" 2)
+  FP_CELL1[$a]=$(fp "${a}_cell.csv" 1); FP_CELL2[$a]=$(fp "${a}_cell.csv" 2)
+  FP_A[$a]=$(fp "${a}_AB.csv" 1); FP_B[$a]=$(fp "${a}_AB.csv" 2)
+  check D12 "$([[ "$(row "${a}_man.csv" 1 | cut -d, -f1-3)" == "25,25,25" && "$(row "${a}_man.csv" 2 | cut -d, -f1-3)" == "25,25,25" ]] && echo 1)" \
+        "$a: BOX MANUAL (50 A, h 2.0) not honoured: dims $(row "${a}_man.csv" 1 | cut -d, -f1-3)"
+  check D12 "$([[ "$(row "${a}_cell.csv" 1 | cut -d, -f1-3)" == "15,15,15" && "$(row "${a}_cell.csv" 2 | cut -d, -f1-3)" == "22,20,18" ]] && echo 1)" \
+        "$a: BOX CELL per MODEL not honoured: dims $(row "${a}_cell.csv" 1 | cut -d, -f1-3) | $(row "${a}_cell.csv" 2 | cut -d, -f1-3)"
 done
 
-# same grid across methods (dims proxy)
+# same grid across methods: full fingerprint (dims, h_i, origin, pbc, occupancy SHA-256), every frame, every deck
 for a in "${ALGOS[@]}"; do
   check S-5 "$([[ "${DIMS_A[$a]}" == "${DIMS_A[bls]}" && "${DIMS_B[$a]}" == "${DIMS_B[bls]}" ]] && echo 1)" \
         "$a: grid dims differ from BLS (${DIMS_A[$a]} vs ${DIMS_A[bls]})"
+  for v in FP_A FP_B FP_MAN1 FP_MAN2 FP_CELL1 FP_CELL2; do
+    declare -n arr="$v"
+    check S-5 "$([[ -n "${arr[$a]}" && "${arr[$a]}" == "${arr[bls]}" ]] && echo 1)" \
+          "$a: grid fingerprint ($v) differs from BLS: '${arr[$a]}' vs '${arr[bls]}'"
+    unset -n arr
+  done
 done
 
 # exact methods: identical nclusters and max_cluster on each frame (BLS at dNN 0.6 voxel included)
@@ -138,7 +171,7 @@ done
 
 echo
 echo "== test_audit_trajectory: per-claim summary =="
-for c in TRJ-CNT TRJ-ID TRJ-ORD TRJ-BOX S-5; do
+for c in TRJ-CNT TRJ-ID TRJ-ORD TRJ-BOX TRJ-ORIG D12 S-5; do
   v="FAILED_$(echo "$c" | tr -c 'A-Za-z0-9' '_')"
   if [[ -n "${!v:-}" ]]; then echo "  FAIL $c"; else echo "  PASS $c"; fi
 done
