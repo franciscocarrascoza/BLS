@@ -73,6 +73,9 @@ struct ClusterParams {
   int connectivity{6};          // 6 or 26 connectivity
   int minClusterSize{5};        // Minimum cluster size for HDBSCAN
   int minSamples{5};            // Minimum samples for HDBSCAN core points
+  // Deck PBC xyz: adjacency wraps across the grid faces. Only methods for which
+  // supportsPeriodic() is true accept it; runClusterAlgorithm throws for the others.
+  bool periodic{false};
 };
 
 // Optional per-voxel label output.
@@ -113,6 +116,9 @@ ClusterResult runClusterAlgorithm(
 // True if runClusterAlgorithm accepts a non-null `labels` for this algorithm.
 bool supportsLabels(ClusterAlgorithm algo);
 
+// Whether the method implements periodic adjacency (deck PBC xyz).
+bool supportsPeriodic(ClusterAlgorithm algo);
+
 // Individual algorithm implementations (kept simple for benchmarking fairness)
 
 // Traditional DFS clustering - O(n) where n is number of occupied voxels
@@ -120,13 +126,15 @@ ClusterResult traditionalDFS(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
-    std::vector<int>* labels = nullptr);
+    std::vector<int>* labels = nullptr,
+    bool periodic = false);
 
 // Skip-DFS clustering - O(n/skip^3) expected
 ClusterResult skipDFS(
     int nx, int ny, int nz, int skip,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    bool periodic = false);
 
 // DBSCAN clustering with grid-based spatial indexing
 ClusterResult dbscan(
@@ -155,7 +163,8 @@ ClusterResult gcbd(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
-    std::vector<int>* labels = nullptr);
+    std::vector<int>* labels = nullptr,
+    bool periodic = false);
 
 // HDBSCAN (Hierarchical Density-Based Spatial Clustering)
 ClusterResult hdbscan(
@@ -182,7 +191,8 @@ ClusterResult cc3dOptimized(
     int connectivity,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
-    std::vector<int>* labels = nullptr);
+    std::vector<int>* labels = nullptr,
+    bool periodic = false);
 
 // RLE-based CCL, textbook track. Encodes runs but unions individual voxels, and
 // sweeps the full grid volume three times. Held at BLS's optimization level.
@@ -199,7 +209,8 @@ ClusterResult rleCCLOptimized(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
-    std::vector<int>* labels = nullptr);
+    std::vector<int>* labels = nullptr,
+    bool periodic = false);
 
 // VCCS - Voxel Cloud Connected Segmentation
 // Places seeds on a uniform 3D grid (spacing = seedResolution voxels) then

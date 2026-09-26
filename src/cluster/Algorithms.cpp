@@ -139,6 +139,22 @@ bool supportsLabels(ClusterAlgorithm algo) {
   }
 }
 
+bool supportsPeriodic(ClusterAlgorithm algo) {
+  switch (algo) {
+    case ClusterAlgorithm::BLS:  // Analyzer::labelGrid (commensurate lattice, periodic refinement)
+    case ClusterAlgorithm::TraditionalDFS:
+    case ClusterAlgorithm::SkipDFS:
+    case ClusterAlgorithm::GCBD:
+    case ClusterAlgorithm::CC3DOptimized:
+    case ClusterAlgorithm::RLECCLOptimized:
+      return true;
+    default:
+      // Withdrawn textbook tracks (cc3d, rle_ccl, vccs), withdrawn DBSCAN/HDBSCAN (D4/D5),
+      // k-means (declared non-periodic, D11), hierarchical (SI only), vccs_optimized (WP4).
+      return false;
+  }
+}
+
 ClusterResult runClusterAlgorithm(
     ClusterAlgorithm algo,
     const ClusterParams& params,
@@ -152,16 +168,21 @@ ClusterResult runClusterAlgorithm(
                              "partially labelled buffer would look like a valid partition.");
   }
 
+  if (params.periodic && !supportsPeriodic(algo)) {
+    throw std::runtime_error("PBC is not implemented for " + algorithmToString(algo));
+  }
+
   // Note: BLS is handled separately in the main analyzer since it requires
   // lattice enumeration. This function handles the comparison algorithms.
   switch (algo) {
     case ClusterAlgorithm::BLS:
       throw std::runtime_error("BLS algorithm should be run through the Analyzer class.");
     case ClusterAlgorithm::TraditionalDFS:
-      return traditionalDFS(params.nx, params.ny, params.nz, occupancy, visited, labels);
+      return traditionalDFS(params.nx, params.ny, params.nz, occupancy, visited, labels,
+                            params.periodic);
     case ClusterAlgorithm::SkipDFS:
       return skipDFS(params.nx, params.ny, params.nz, params.skipDfsJumpDistance, occupancy,
-                     visited);
+                     visited, params.periodic);
     case ClusterAlgorithm::DBSCAN:
       return dbscan(params.nx, params.ny, params.nz, params.eps, params.minPts, occupancy, visited);
     case ClusterAlgorithm::Hierarchical:
@@ -169,18 +190,19 @@ ClusterResult runClusterAlgorithm(
     case ClusterAlgorithm::KMeans:
       return kmeans(params.nx, params.ny, params.nz, params.k, occupancy, visited);
     case ClusterAlgorithm::GCBD:
-      return gcbd(params.nx, params.ny, params.nz, occupancy, visited, labels);
+      return gcbd(params.nx, params.ny, params.nz, occupancy, visited, labels, params.periodic);
     case ClusterAlgorithm::HDBSCAN:
       return hdbscan(params.nx, params.ny, params.nz, params.minClusterSize, params.minSamples, occupancy, visited);
     case ClusterAlgorithm::CC3D:
       return cc3d(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited, labels);
     case ClusterAlgorithm::CC3DOptimized:
       return cc3dOptimized(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited,
-                           labels);
+                           labels, params.periodic);
     case ClusterAlgorithm::RLECCL:
       return rleCCL(params.nx, params.ny, params.nz, occupancy, visited, labels);
     case ClusterAlgorithm::RLECCLOptimized:
-      return rleCCLOptimized(params.nx, params.ny, params.nz, occupancy, visited, labels);
+      return rleCCLOptimized(params.nx, params.ny, params.nz, occupancy, visited, labels,
+                             params.periodic);
     case ClusterAlgorithm::VCCS:
       // Use params.eps as seed spacing in voxels (default 3.0)
       return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
@@ -191,7 +213,10 @@ ClusterResult runClusterAlgorithm(
 }
 
 // Traditional DFS - kept simple for benchmarking
-ClusterResult traditionalDFS(
+namespace {
+
+template <bool Periodic>
+ClusterResult traditionalDFSImpl(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
@@ -241,8 +266,16 @@ ClusterResult traditionalDFS(
           int ni = i + deltas6[d][0];
           int nj = j + deltas6[d][1];
           int nk = k + deltas6[d][2];
-          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+          if constexpr (Periodic) {
+            // PBC xyz: the neighbour across a face is the voxel on the opposite face.
+            ni = ni < 0 ? ni + nx : (ni >= nx ? ni - nx : ni);
+            nj = nj < 0 ? nj + ny : (nj >= ny ? nj - ny : nj);
+            nk = nk < 0 ? nk + nz : (nk >= nz ? nk - nz : nk);
             stack.push_back({ni, nj, nk, 0});
+          } else {
+            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+              stack.push_back({ni, nj, nk, 0});
+            }
           }
         }
       }
@@ -261,8 +294,21 @@ ClusterResult traditionalDFS(
   return result;
 }
 
+}  // namespace
+
+ClusterResult traditionalDFS(int nx, int ny, int nz, const std::vector<uint8_t>& occupancy,
+                             std::vector<uint8_t>& visited, std::vector<int>* labels, bool periodic) {
+  // PBC xyz runs a separate instantiation: PBC none executes the pre-audit code
+  // unchanged (same instructions, same cost); only the periodic run pays for wrapping.
+  return periodic ? traditionalDFSImpl<true>(nx, ny, nz, occupancy, visited, labels)
+                  : traditionalDFSImpl<false>(nx, ny, nz, occupancy, visited, labels);
+}
+
 // Skip-DFS - kept simple for benchmarking
-ClusterResult skipDFS(
+namespace {
+
+template <bool Periodic>
+ClusterResult skipDFSImpl(
     int nx, int ny, int nz, int skip,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited) {
@@ -275,6 +321,19 @@ ClusterResult skipDFS(
 
   std::vector<StackElement> stack;
   stack.reserve(10000);
+
+  // In-grid test for a neighbour; under PBC xyz the neighbour is wrapped onto the grid
+  // instead (true modulo: a jump can exceed a small dimension).
+  auto inside = [nx, ny, nz](int& a, int& b, int& c) {
+    if constexpr (Periodic) {
+      a = ((a % nx) + nx) % nx;
+      b = ((b % ny) + ny) % ny;
+      c = ((c % nz) + nz) % nz;
+      return true;
+    } else {
+      return a >= 0 && a < nx && b >= 0 && b < ny && c >= 0 && c < nz;
+    }
+  };
 
   int skipDeltas[6][3] = {{-skip, 0, 0}, {skip, 0, 0}, {0, -skip, 0},
                            {0, skip, 0}, {0, 0, -skip}, {0, 0, skip}};
@@ -323,7 +382,7 @@ ClusterResult skipDFS(
               int ii = i + step_i * step;
               int jj = j + step_j * step;
               int kk = k + step_k * step;
-              if (ii >= 0 && ii < nx && jj >= 0 && jj < ny && kk >= 0 && kk < nz) {
+              if (inside(ii, jj, kk)) {
                 stack.push_back({ii, jj, kk, 0});
               }
             }
@@ -331,7 +390,7 @@ ClusterResult skipDFS(
             int ni = i + di;
             int nj = j + dj;
             int nk = k + dk;
-            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+            if (inside(ni, nj, nk)) {
               std::size_t nIndex = idx3(ni, nj, nk, ny, nz);
               stack.push_back({ni, nj, nk, occupancy[nIndex] == 1 ? 1 : 0});
             }
@@ -342,7 +401,7 @@ ClusterResult skipDFS(
             int ni = i + deltas6[d][0];
             int nj = j + deltas6[d][1];
             int nk = k + deltas6[d][2];
-            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+            if (inside(ni, nj, nk)) {
               std::size_t nIndex = idx3(ni, nj, nk, ny, nz);
               stack.push_back({ni, nj, nk, occupancy[nIndex] == 1 ? 1 : 0});
             }
@@ -361,6 +420,16 @@ ClusterResult skipDFS(
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult skipDFS(int nx, int ny, int nz, int skip, const std::vector<uint8_t>& occupancy,
+                      std::vector<uint8_t>& visited, bool periodic) {
+  // PBC xyz runs a separate instantiation: PBC none executes the pre-audit code
+  // unchanged (same instructions, same cost); only the periodic run pays for wrapping.
+  return periodic ? skipDFSImpl<true>(nx, ny, nz, skip, occupancy, visited)
+                  : skipDFSImpl<false>(nx, ny, nz, skip, occupancy, visited);
 }
 
 // DBSCAN with grid-based spatial indexing
@@ -717,7 +786,10 @@ ClusterResult kmeans(
 }
 
 // GCBD (Grid-based Connectivity using Union-Find)
-ClusterResult gcbd(
+namespace {
+
+template <bool Periodic>
+ClusterResult gcbdImpl(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
@@ -729,6 +801,19 @@ ClusterResult gcbd(
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
   initLabels(labels, totalSize);
+
+  // In-grid test for a neighbour; under PBC xyz the neighbour is wrapped onto the grid
+  // instead (true modulo: a jump can exceed a small dimension).
+  auto inside = [nx, ny, nz](int& a, int& b, int& c) {
+    if constexpr (Periodic) {
+      a = ((a % nx) + nx) % nx;
+      b = ((b % ny) + ny) % ny;
+      c = ((c % nz) + nz) % nz;
+      return true;
+    } else {
+      return a >= 0 && a < nx && b >= 0 && b < ny && c >= 0 && c < nz;
+    }
+  };
 
   // Union-Find structure operating on voxel indices
   std::vector<int> parent(totalSize);
@@ -772,7 +857,7 @@ ClusterResult gcbd(
           int ni = i + deltas6[d][0];
           int nj = j + deltas6[d][1];
           int nk = k + deltas6[d][2];
-          if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
+          if (inside(ni, nj, nk)) {
             std::size_t nIdx = idx3(ni, nj, nk, ny, nz);
             if (occupancy[nIdx] == 1) {
               unite(static_cast<int>(idx), static_cast<int>(nIdx));
@@ -812,6 +897,16 @@ ClusterResult gcbd(
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult gcbd(int nx, int ny, int nz, const std::vector<uint8_t>& occupancy,
+                   std::vector<uint8_t>& visited, std::vector<int>* labels, bool periodic) {
+  // PBC xyz runs a separate instantiation: PBC none executes the pre-audit code
+  // unchanged (same instructions, same cost); only the periodic run pays for wrapping.
+  return periodic ? gcbdImpl<true>(nx, ny, nz, occupancy, visited, labels)
+                  : gcbdImpl<false>(nx, ny, nz, occupancy, visited, labels);
 }
 
 // HDBSCAN (Hierarchical Density-Based Spatial Clustering)
@@ -1091,7 +1186,10 @@ ClusterResult cc3d(
 // provisional labels (2*ny*nz ints, 660 KB at E1 size against 95 MB for a full
 // grid) and records each occupied voxel's provisional label into a compact list
 // as it goes, so the resolve pass never needs to address by coordinate again.
-ClusterResult cc3dOptimized(
+namespace {
+
+template <bool Periodic>
+ClusterResult cc3dOptimizedImpl(
     int nx, int ny, int nz,
     int connectivity,
     const std::vector<uint8_t>& occupancy,
@@ -1181,6 +1279,42 @@ ClusterResult cc3dOptimized(
     std::swap(prevPlane, currPlane);
   }
 
+  if constexpr (Periodic) {
+    // PBC xyz: pass 1 saw every neighbour pair inside the grid; the pairs that wrap
+    // across a face are united here, from the voxels on the faces, over the full
+    // stencil. A neighbour's provisional label is found in the raster-ordered (so
+    // ascending) occupied list.
+    auto labelAt = [&](int vidx) {
+      const auto it = std::lower_bound(occIdx.begin(), occIdx.end(), vidx);
+      return (it != occIdx.end() && *it == vidx)
+                 ? occLab[static_cast<std::size_t>(it - occIdx.begin())]
+                 : 0;
+    };
+    const int plane = ny * nz;
+    for (std::size_t n = 0; n < occIdx.size(); ++n) {
+      const int i = occIdx[n] / plane;
+      const int j = (occIdx[n] - i * plane) / nz;
+      const int k = occIdx[n] - i * plane - j * nz;
+      if (i != 0 && i != nx - 1 && j != 0 && j != ny - 1 && k != 0 && k != nz - 1) continue;
+      for (int di = -1; di <= 1; ++di) {
+        for (int dj = -1; dj <= 1; ++dj) {
+          for (int dk = -1; dk <= 1; ++dk) {
+            const int manhattan = std::abs(di) + std::abs(dj) + std::abs(dk);
+            if (manhattan == 0 || (connectivity != 26 && manhattan != 1)) continue;
+            int ni = i + di, nj = j + dj, nk = k + dk;
+            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) continue;
+            ni = (ni + nx) % nx;
+            nj = (nj + ny) % ny;
+            nk = (nk + nz) % nz;
+            const int nidx = static_cast<int>(idx3(ni, nj, nk, ny, nz));
+            if (occupancy[static_cast<std::size_t>(nidx)] != 1) continue;
+            unite(occLab[n], labelAt(nidx));
+          }
+        }
+      }
+    }
+  }
+
   // Pass 2: resolve equivalences to dense ids and tally, walking the compact
   // occupied list. Ids are handed out in order of first appearance, which is
   // raster order -- exactly what compactLabels() would produce.
@@ -1214,6 +1348,17 @@ ClusterResult cc3dOptimized(
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult cc3dOptimized(int nx, int ny, int nz, int connectivity,
+                            const std::vector<uint8_t>& occupancy, std::vector<uint8_t>& visited,
+                            std::vector<int>* labels, bool periodic) {
+  // PBC xyz runs a separate instantiation: PBC none executes the pre-audit code
+  // unchanged (same instructions, same cost); only the periodic run pays for wrapping.
+  return periodic ? cc3dOptimizedImpl<true>(nx, ny, nz, connectivity, occupancy, visited, labels)
+                  : cc3dOptimizedImpl<false>(nx, ny, nz, connectivity, occupancy, visited, labels);
 }
 
 // ── RLE-based CCL ────────────────────────────────────────────────────────────
@@ -1401,7 +1546,10 @@ ClusterResult rleCCL(
 // 6-connected components of the same occupancy, and connectivity of a run to
 // its neighbours is unchanged by whether its interior was unioned voxel by
 // voxel.
-ClusterResult rleCCLOptimized(
+namespace {
+
+template <bool Periodic>
+ClusterResult rleCCLOptimizedImpl(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
@@ -1478,6 +1626,33 @@ ClusterResult rleCCLOptimized(
     std::swap(prevSlice, currSlice);
   }
 
+  if constexpr (Periodic) {
+    // PBC xyz: runs that touch opposite faces are merged here, after the in-grid
+    // merges above. Runs were created in raster order, so each row's runs form a
+    // contiguous, kStart-ordered id range.
+    std::vector<int> rowStart(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) + 1, 0);
+    for (const Run& r : runs)
+      ++rowStart[static_cast<std::size_t>(r.i) * static_cast<std::size_t>(ny) +
+                 static_cast<std::size_t>(r.j) + 1];
+    for (std::size_t r = 1; r < rowStart.size(); ++r) rowStart[r] += rowStart[r - 1];
+    auto rowRuns = [&](int i, int j) {
+      const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(ny) +
+                              static_cast<std::size_t>(j);
+      std::vector<int> ids;
+      for (int id = rowStart[row]; id < rowStart[row + 1]; ++id) ids.push_back(id);
+      return ids;
+    };
+    for (std::size_t row = 0; row + 1 < rowStart.size(); ++row) {  // z faces, within a row
+      const int first = rowStart[row], last = rowStart[row + 1] - 1;
+      if (first <= last && runs[static_cast<std::size_t>(first)].kStart == 0 &&
+          runs[static_cast<std::size_t>(last)].kEnd == nz - 1) {
+        unite(first, last);
+      }
+    }
+    for (int i = 0; i < nx; ++i) mergeRuns(rowRuns(i, 0), rowRuns(i, ny - 1));  // y faces
+    for (int j = 0; j < ny; ++j) mergeRuns(rowRuns(0, j), rowRuns(nx - 1, j));  // x faces
+  }
+
   // Tally over the RUN TABLE, not the grid. Dense ids are assigned in order of
   // first appearance scanning runs in creation order, which is raster order, so
   // this matches what the fair track's compactLabels() produces.
@@ -1514,6 +1689,16 @@ ClusterResult rleCCLOptimized(
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult rleCCLOptimized(int nx, int ny, int nz, const std::vector<uint8_t>& occupancy,
+                              std::vector<uint8_t>& visited, std::vector<int>* labels, bool periodic) {
+  // PBC xyz runs a separate instantiation: PBC none executes the pre-audit code
+  // unchanged (same instructions, same cost); only the periodic run pays for wrapping.
+  return periodic ? rleCCLOptimizedImpl<true>(nx, ny, nz, occupancy, visited, labels)
+                  : rleCCLOptimizedImpl<false>(nx, ny, nz, occupancy, visited, labels);
 }
 
 // ── VCCS — Voxel Cloud Connected Segmentation ─────────────────────────────────

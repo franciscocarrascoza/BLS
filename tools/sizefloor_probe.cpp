@@ -207,6 +207,7 @@ int main(int argc, char** argv) {
   ClusterParams params;
   params.nx = nx; params.ny = ny; params.nz = nz;
   params.connectivity = config.connectivity;
+  params.periodic = config.pbc.all();  // deck PBC xyz: same periodicity as the grid and as BLS
   std::vector<int> dfsLabels;
   ClusterResult dfs = runClusterAlgorithm(ClusterAlgorithm::TraditionalDFS, params,
                                           grid.occupancy(), grid.visited(), &dfsLabels);

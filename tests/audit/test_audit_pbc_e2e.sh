@@ -9,8 +9,11 @@
 #   E2E-ORIG   LATTICE_ORIGIN is accepted and applied: at full coverage the answer does not change; on a sparse
 #              lattice (dNN 2.4 voxels) the seed set moves while the periodic probe count n_x n_y n_z |offsets|
 #              stays fixed
-#   E2E-REFUSE comparison methods refuse PBC xyz (non-zero exit, message) until periodic adjacency exists for
-#              them (WP3); a hexagonal probe lattice under PBC xyz is refused (D10)
+#   E2E-EXACT  the exact comparison methods with periodic adjacency (WP3: traditional_dfs, skip_dfs at unit
+#              stride, gcbd, cc3d_optimized, rle_ccl_optimized) agree with BLS under PBC xyz and PBC none
+#   E2E-REFUSE methods without periodic adjacency refuse PBC xyz (non-zero exit, message): withdrawn cc3d,
+#              rle_ccl, vccs, dbscan, hdbscan; k-means, hierarchical, vccs_optimized; a hexagonal probe
+#              lattice under PBC xyz is refused (D10)
 #
 # Usage: test_audit_pbc_e2e.sh /path/to/bls_analyze
 set -uo pipefail
@@ -96,9 +99,24 @@ check E2E-ORIG "$([[ $(col sparse.csv 10) != "$(col sparse_orig.csv 10)" && $(co
                      $(col sparse.csv 12) == 2 && $(col sparse_orig.csv 12) == 2 ]] && echo 1)" \
       "sparse PBC: seeds $(col sparse.csv 10) vs $(col sparse_orig.csv 10) with LATTICE_ORIGIN (want different), probes $(col sparse.csv 26) vs $(col sparse_orig.csv 26) (want equal), nclusters $(col sparse.csv 12)/$(col sparse_orig.csv 12) (want 2)"
 
-# Refusals: comparison methods under PBC (until WP3), hexagonal probe lattice under PBC (D10).
-for a in traditional_dfs cc3d_optimized gcbd; do
-  run pbc.in "refuse_$a.csv" "$a"; rc=$?
+# Exact methods with periodic adjacency: same clusters as BLS (full coverage) under both settings.
+run_algo() {  # deck out algo extra...
+  local d="$1" o="$2" a="$3"; shift 3
+  "$BIN" --system "$WORK/cross.pdb" --format pdb --conf "$WORK/$d" --algo "$a" "$@" --quiet --out "$WORK/$o" 2>>"$WORK/stderr_$o.log"
+}
+for a in traditional_dfs skip_dfs gcbd cc3d_optimized rle_ccl_optimized; do
+  extra=(); [[ $a == skip_dfs ]] && extra=(--algo-skip 1); [[ $a == cc3d_optimized ]] && extra=(--algo-connectivity 6)
+  run_algo pbc.in "x_$a.csv" "$a" "${extra[@]}"; rc1=$?
+  run_algo none.in "n_$a.csv" "$a" "${extra[@]}"; rc2=$?
+  check E2E-EXACT "$([[ $rc1 == 0 && $rc2 == 0 && $(col "x_$a.csv" 12),$(col "x_$a.csv" 13) == $(col pbc.csv 12),$(col pbc.csv 13) && \
+                        $(col "n_$a.csv" 12),$(col "n_$a.csv" 13) == $(col none.csv 12),$(col none.csv 13) && $(col "x_$a.csv" 24) == xyz ]] && echo 1)" \
+        "$a: PBC xyz $(col "x_$a.csv" 12),$(col "x_$a.csv" 13) vs BLS $(col pbc.csv 12),$(col pbc.csv 13); none $(col "n_$a.csv" 12),$(col "n_$a.csv" 13) vs BLS $(col none.csv 12),$(col none.csv 13) (rc $rc1/$rc2) $(cat "$WORK/stderr_x_$a.csv.log")"
+done
+
+# Refusals: methods without periodic adjacency, hexagonal probe lattice under PBC (D10).
+for a in cc3d rle_ccl vccs vccs_optimized dbscan hdbscan kmeans hierarchical; do
+  extra=(); [[ $a == kmeans ]] && extra=(--algo-k 2)
+  run_algo pbc.in "refuse_$a.csv" "$a" "${extra[@]}"; rc=$?
   check E2E-REFUSE "$([[ $rc != 0 ]] && grep -q "PBC is not implemented" "$WORK/stderr_refuse_$a.csv.log" && echo 1)" \
         "$a ran under PBC xyz (rc=$rc)"
 done
@@ -108,7 +126,7 @@ check E2E-REFUSE "$([[ $rc != 0 ]] && grep -qi "cubic" "$WORK/stderr_hex.csv.log
 
 echo
 echo "== test_audit_pbc_e2e: per-claim summary =="
-for c in E2E-PBC E2E-META E2E-ORIG E2E-REFUSE; do
+for c in E2E-PBC E2E-META E2E-ORIG E2E-EXACT E2E-REFUSE; do
   v="FAILED_$(echo "$c" | tr -c 'A-Za-z0-9' '_')"
   if [[ -n "${!v:-}" ]]; then echo "  FAIL $c"; else echo "  PASS $c"; fi
 done

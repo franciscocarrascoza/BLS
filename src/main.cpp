@@ -449,7 +449,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
       }
     } else {
-      if (spec.pbc.any()) {
+      if (spec.pbc.any() && !supportsPeriodic(selectedAlgo)) {
         std::cerr << "Error: PBC is not implemented for " << algorithmToString(selectedAlgo)
                   << "\n";
         return EXIT_FAILURE;
@@ -467,6 +467,7 @@ int main(int argc, char** argv) {
           opts.algoConnectivitySet ? opts.algoConnectivity : config.connectivity;
       params.minClusterSize = opts.algoMinClusterSize;
       params.minSamples = opts.algoMinSamples;
+      params.periodic = spec.pbc.all();
 
       ScopedTimer labelTimer;
       ClusterResult result =

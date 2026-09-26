@@ -104,6 +104,7 @@ int main(int argc, char** argv) {
   params.nx = nx; params.ny = ny; params.nz = nz;
   params.eps = seedRes;
   params.connectivity = config.connectivity;
+  params.periodic = config.pbc.all();  // deck PBC xyz: same periodicity as the grid and as BLS
 
   ClusterResult dfs = runClusterAlgorithm(ClusterAlgorithm::TraditionalDFS, params,
                                           grid.occupancy(), grid.visited());
