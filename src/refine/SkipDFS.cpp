@@ -56,6 +56,14 @@ std::size_t SkipDFS::index(int x, int y, int z) const {
 }
 
 int SkipDFS::runFrom(int x, int y, int z, std::vector<int>* labels, int labelValue) {
+  // The periodic walk is a separate instantiation, so PBC none runs exactly the
+  // pre-audit loop (same code, same cost) and only PBC xyz pays for the wrap.
+  return cfg_.periodic ? walk<true>(x, y, z, labels, labelValue)
+                       : walk<false>(x, y, z, labels, labelValue);
+}
+
+template <bool Periodic>
+int SkipDFS::walk(int x, int y, int z, std::vector<int>* labels, int labelValue) {
   if (x < 0 || y < 0 || z < 0 || x >= cfg_.nx || y >= cfg_.ny || z >= cfg_.nz) return 0;
   std::size_t start = index(x, y, z);
   if (!occ_[start] || visited_[start]) return 0;
@@ -86,7 +94,14 @@ int SkipDFS::runFrom(int x, int y, int z, std::vector<int>* labels, int labelVal
         int nx = cx + dir[0] * step;
         int ny = cy + dir[1] * step;
         int nz = cz + dir[2] * step;
-        if (nx < 0 || ny < 0 || nz < 0 || nx >= cfg_.nx || ny >= cfg_.ny || nz >= cfg_.nz) break;
+        if constexpr (Periodic) {
+          // |dir * step| can exceed a small grid dimension, so wrap with a true modulo.
+          nx = ((nx % cfg_.nx) + cfg_.nx) % cfg_.nx;
+          ny = ((ny % cfg_.ny) + cfg_.ny) % cfg_.ny;
+          nz = ((nz % cfg_.nz) + cfg_.nz) % cfg_.nz;
+        } else {
+          if (nx < 0 || ny < 0 || nz < 0 || nx >= cfg_.nx || ny >= cfg_.ny || nz >= cfg_.nz) break;
+        }
         std::size_t nidx = index(nx, ny, nz);
         if (!occ_[nidx]) break;
         if (!visited_[nidx]) {

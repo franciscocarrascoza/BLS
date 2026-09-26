@@ -15,6 +15,9 @@ struct SkipDFSConfig {
   // BLS's refinement stride (config keyword SKIP). Unrelated to
   // cluster::skipDFS's jump distance despite the shared word.
   int refinementStride{3};
+  // Periodic grid (deck PBC xyz): neighbour indices wrap modulo the grid dimensions
+  // instead of stopping at the faces. Default false = pre-audit behaviour.
+  bool periodic{false};
 };
 
 struct SkipDFSResult {
@@ -39,6 +42,8 @@ class SkipDFS {
  private:
   std::size_t index(int x, int y, int z) const;
   void push(int idx);
+  template <bool Periodic>
+  int walk(int x, int y, int z, std::vector<int>* labels, int labelValue);
 
   SkipDFSConfig cfg_;
   const std::vector<uint8_t>& occ_;

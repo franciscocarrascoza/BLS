@@ -14,11 +14,35 @@ class Enumerator {
   // Enumerate all lattice points in the grid volume, independent of occupancy.
   Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz);
 
-  // Occupancy-filtered: enumerate the lattice sites (identical set to the
-  // constructor above), map each to its containing voxel, and admit it as a
-  // seed iff that voxel is occupied. At most one seed per lattice site.
+  // BLS seeding as the manuscript describes it (§2, §2.1.2; audit decision D3): every
+  // lattice probe site whose rounded voxel lies in the grid is evaluated once -- round
+  // to the voxel, read its occupancy, O(1) -- and the occupied ones are the seed set S,
+  // put in lexicographic (x,y,z) order and de-duplicated (two sites can round onto one
+  // voxel when dNN < sqrt(3) voxels). probes() is the number of sites evaluated, the m
+  // of §2.1.2. The seed set and its order are those of occupiedSweep() below; only the
+  // work differs (m site evaluations instead of a sweep over all M^3 voxels).
+  // `origin` (voxels, deck LATTICE_ORIGIN) translates every site before rounding:
+  // site = basis * (idx + offset) + origin. The default zero leaves the arithmetic exact.
   Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
-             const std::vector<uint8_t>& occupancy);
+             const std::vector<uint8_t>& occupancy, const Vec3& origin = Vec3{});
+
+  // Periodic grid (deck PBC xyz; audit decision D10). `basis` must be a commensurate
+  // basis from commensurateCubicBasis() (Basis.hpp): diagonal, a_i = N_i / n_i with
+  // n_i integral, so the lattice tiles the periodic grid. Sites idx + offset with
+  // idx_i in [0, n_i) are evaluated; voxel = llround(site) wrapped modulo N_i.
+  // probes() = n_x * n_y * n_z * offsets.size(). Throws std::invalid_argument for a
+  // basis that is not commensurate with the grid.
+  struct PeriodicTag {};
+  Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
+             const std::vector<uint8_t>& occupancy, PeriodicTag, const Vec3& origin = Vec3{});
+
+  // BLS seeding before audit decision D3, kept as a test oracle only: sweeps every voxel
+  // (word-skipping empty runs) and tests each occupied one for lattice membership. Same
+  // seed set in the same order as the probe evaluation above, by construction (see the
+  // derivation in Enumerator.cpp); probes() is 0 because no site is evaluated.
+  static Enumerator occupiedSweep(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
+                                  int ny, int nz, const std::vector<uint8_t>& occupancy,
+                                  const Vec3& origin = Vec3{});
 
   struct Seed {
     int x;
@@ -57,26 +81,34 @@ class Enumerator {
 
   int count() const { return static_cast<int>(seeds_.size()); }
 
+  // Lattice probe sites evaluated while building (m of §2.1.2); 0 for occupiedSweep().
+  long long probes() const { return probes_; }
+
  private:
+  Enumerator() = default;
   struct LegacyRadiusTag {};
   Enumerator(LegacyRadiusTag, const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
              int nz, const std::vector<uint8_t>& occupancy);
 
-  // Shared core for both public constructors, dispatching on whether occupancy
-  // is available. Without it, walks every lattice index whose site can land in
-  // the grid, appends the in-range ones, then sorts and deduplicates by voxel.
-  // With it, defers to buildFromOccupancy, which returns the identical set.
+  // Probe evaluation shared by the non-periodic constructors: walks every lattice
+  // index whose site can land in the grid, evaluates the in-range sites (counting
+  // them in probes_), keeps those on an occupied voxel (all of them when occupancy is
+  // null), then sorts and de-duplicates by voxel.
   void build(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
-             const std::vector<uint8_t>* occupancy);
+             const std::vector<uint8_t>* occupancy, const Vec3& origin = Vec3{});
 
-  // Occupancy-driven path taken by build() when occupancy is supplied: iterate
-  // occupied voxels and ask which lattice sites round onto them, rather than
-  // sweeping the whole grid volume. Produces the same seed set in the same
-  // order -- see the derivation above its definition in Enumerator.cpp.
+  // Periodic probe evaluation (PeriodicTag constructor).
+  void buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
+                     const std::vector<uint8_t>& occupancy, const Vec3& origin);
+
+  // occupiedSweep(): iterate occupied voxels and ask which lattice sites round onto
+  // them. Produces the same seed set in the same order as build() -- see the
+  // derivation above its definition in Enumerator.cpp.
   void buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
-                          int nz, const std::vector<uint8_t>& occupancy);
+                          int nz, const std::vector<uint8_t>& occupancy, const Vec3& origin);
 
   std::vector<Seed> seeds_;
+  long long probes_{0};
 };
 
 }  // namespace bls

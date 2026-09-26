@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "common/Types.hpp"
@@ -23,14 +24,15 @@ struct Bounds {
 
 }  // namespace
 
-// Occupancy-driven enumeration. Same seed set as the volume sweep below, found
-// by inverting the question instead of sweeping: for each OCCUPIED voxel, is
+// Occupancy-driven enumeration (occupiedSweep). Same seed set as the probe
+// evaluation below, found by inverting the question: for each OCCUPIED voxel, is
 // there a lattice site that rounds to it?
 //
-// Why it is worth having: the volume sweep visits every lattice site in the
-// grid -- ~2.3M on E1/Ic -- to find the ~2.2k that land on the ~21k occupied
-// voxels. E1 occupancy is 0.09%, so >99.9% of that work is discarded, and
-// enumeration was 69-77% of BLS's total pipeline time on all four E1 systems.
+// This was BLS's seeding from Task 10 until the 2026-09-26 audit. It is not the
+// method the manuscript describes (§2.1.2: the m ~ 4M^3/a^3 probe sites are
+// evaluated); it sweeps all M^3 voxels, as DFS's raster does (audit S1-3). Audit
+// decision D3 put the described probe evaluation back into BLS; this path is kept
+// as the oracle that the probe evaluation returns the identical seed list.
 //
 // Why the seed set is provably identical, not merely equal in testing:
 // llround(site) == v implies |site_k - v_k| <= 0.5 for every k. Writing
@@ -50,7 +52,8 @@ struct Bounds {
 // the lexicographic (x,y,z) order the volume path sorts into, and each voxel is
 // tested once, which is what its dedup achieves.
 void Enumerator::buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
-                                    int ny, int nz, const std::vector<uint8_t>& occupancy) {
+                                    int ny, int nz, const std::vector<uint8_t>& occupancy,
+                                    const Vec3& origin) {
   const Mat3 invBasis = inverse(basis);
 
   // Half-width of the candidate box, per lattice-index axis. Derived above; the
@@ -64,7 +67,7 @@ void Enumerator::buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& 
 
   std::vector<Vec3> offsetsReal;
   offsetsReal.reserve(offsets.size());
-  for (const auto& o : offsets) offsetsReal.push_back(basis * o);
+  for (const auto& o : offsets) offsetsReal.push_back(basis * o + origin);
 
   const std::size_t total = static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
                             static_cast<std::size_t>(nz);
@@ -104,7 +107,7 @@ void Enumerator::buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& 
           for (int iz = izLo; iz <= izHi; ++iz) {
             Vec3 latticeIdx{static_cast<double>(ix), static_cast<double>(iy),
                             static_cast<double>(iz)};
-            Vec3 site = basis * (latticeIdx + offsets[oi]);
+            Vec3 site = basis * (latticeIdx + offsets[oi]) + origin;
             if (static_cast<int>(std::llround(site.x)) == vx &&
                 static_cast<int>(std::llround(site.y)) == vy &&
                 static_cast<int>(std::llround(site.z)) == vz) {
@@ -121,13 +124,9 @@ void Enumerator::buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& 
 }
 
 void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
-                       const std::vector<uint8_t>* occupancy) {
-  if (occupancy) {
-    buildFromOccupancy(basis, offsets, nx, ny, nz, *occupancy);
-    return;
-  }
-
+                       const std::vector<uint8_t>* occupancy, const Vec3& origin) {
   Mat3 invBasis = inverse(basis);
+  probes_ = 0;
 
   // A site s is kept iff llround(s_k) is in [0, n_k), i.e. iff s lies in the
   // half-open box [-0.5, n_k - 0.5). Bound the lattice indices with the corners
@@ -147,10 +146,13 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
     }
   }
 
+  const double dims[3] = {static_cast<double>(nx), static_cast<double>(ny),
+                          static_cast<double>(nz)};
+  const Vec3 c3 = basis.column(2);
   std::vector<Seed> provisional;
 
   for (const auto& offset : offsets) {
-    Vec3 offsetReal = basis * offset;
+    Vec3 offsetReal = basis * offset + origin;
     Bounds bnd;
     for (const auto& corner : corners) {
       Vec3 idx = invBasis * (corner - offsetReal);
@@ -171,14 +173,37 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
 
     for (int ix = ixMin; ix <= ixMax; ++ix) {
       for (int iy = iyMin; iy <= iyMax; ++iy) {
-        for (int iz = izMin; iz <= izMax; ++iz) {
+        // The sites of this row are s(iz) = P + iz*c3. Walk only the iz whose site can
+        // round into the grid: s_k in [-0.5, n_k - 0.5] on every axis, solved for iz and
+        // widened by one each side. A superset of the accepted sites -- the exact
+        // llround test below still decides -- so the result cannot change; it only
+        // stops the index box's corners from costing evaluations outside the grid.
+        const Vec3 P = basis * Vec3{static_cast<double>(ix) + offset.x,
+                                    static_cast<double>(iy) + offset.y, offset.z} +
+                       origin;
+        double lo = izMin, hi = izMax;
+        bool rowOutside = false;
+        for (int k = 0; k < 3 && !rowOutside; ++k) {
+          if (std::fabs(c3[k]) < 1e-12) {
+            rowOutside = P[k] < -0.5 - 1e-6 || P[k] > dims[k] - 0.5 + 1e-6;
+            continue;
+          }
+          double t0 = (-0.5 - P[k]) / c3[k], t1 = (dims[k] - 0.5 - P[k]) / c3[k];
+          if (t0 > t1) std::swap(t0, t1);
+          lo = std::max(lo, std::floor(t0) - 1.0);
+          hi = std::min(hi, std::ceil(t1) + 1.0);
+        }
+        if (rowOutside || lo > hi) continue;
+
+        for (int iz = static_cast<int>(lo); iz <= static_cast<int>(hi); ++iz) {
           Vec3 latticeIdx{static_cast<double>(ix), static_cast<double>(iy),
                           static_cast<double>(iz)};
-          Vec3 site = basis * (latticeIdx + offset);
+          Vec3 site = basis * (latticeIdx + offset) + origin;
           int vx = static_cast<int>(std::llround(site.x));
           int vy = static_cast<int>(std::llround(site.y));
           int vz = static_cast<int>(std::llround(site.z));
           if (vx < 0 || vy < 0 || vz < 0 || vx >= nx || vy >= ny || vz >= nz) continue;
+          ++probes_;
           if (occupancy) {
             // Reject here rather than after the sort: on sparse grids this is
             // the difference between materialising every lattice site in the
@@ -210,6 +235,69 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
   seeds_ = std::move(provisional);
 }
 
+void Enumerator::buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
+                               int ny, int nz, const std::vector<uint8_t>& occupancy,
+                               const Vec3& origin) {
+  const int dims[3] = {nx, ny, nz};
+  int cells[3];
+  for (int k = 0; k < 3; ++k) {
+    const Vec3 col = basis.column(k);
+    const double a = col[k];
+    bool diagonal = a > 0.0;
+    for (int j = 0; j < 3; ++j) {
+      if (j != k && col[j] != 0.0) diagonal = false;
+    }
+    const double n = diagonal ? static_cast<double>(dims[k]) / a : 0.0;
+    cells[k] = static_cast<int>(std::llround(n));
+    if (!diagonal || cells[k] < 1 || std::fabs(n - cells[k]) > 1e-9 * n) {
+      throw std::invalid_argument(
+          "Enumerator (periodic): the basis is not commensurate with the grid; build it "
+          "with commensurateCubicBasis()");
+    }
+  }
+
+  probes_ = 0;
+  std::vector<Seed> provisional;
+  auto wrap = [](long long v, int n) {
+    long long r = v % n;
+    return static_cast<int>(r < 0 ? r + n : r);
+  };
+  for (const auto& offset : offsets) {
+    for (int ix = 0; ix < cells[0]; ++ix) {
+      for (int iy = 0; iy < cells[1]; ++iy) {
+        for (int iz = 0; iz < cells[2]; ++iz) {
+          Vec3 latticeIdx{static_cast<double>(ix), static_cast<double>(iy),
+                          static_cast<double>(iz)};
+          Vec3 site = basis * (latticeIdx + offset) + origin;
+          const int vx = wrap(std::llround(site.x), nx);
+          const int vy = wrap(std::llround(site.y), ny);
+          const int vz = wrap(std::llround(site.z), nz);
+          ++probes_;
+          std::size_t idx = static_cast<std::size_t>(vx) * static_cast<std::size_t>(ny) *
+                                static_cast<std::size_t>(nz) +
+                            static_cast<std::size_t>(vy) * static_cast<std::size_t>(nz) +
+                            static_cast<std::size_t>(vz);
+          if (!occupancy[idx]) continue;
+          provisional.push_back(Seed{vx, vy, vz});
+        }
+      }
+    }
+  }
+
+  std::sort(provisional.begin(), provisional.end(),
+            [](const Seed& a, const Seed& b) {
+              if (a.x != b.x) return a.x < b.x;
+              if (a.y != b.y) return a.y < b.y;
+              return a.z < b.z;
+            });
+  provisional.erase(std::unique(provisional.begin(), provisional.end(),
+                                [](const Seed& a, const Seed& b) {
+                                  return a.x == b.x && a.y == b.y && a.z == b.z;
+                                }),
+                    provisional.end());
+  seeds_ = std::move(provisional);
+}
+
 Enumerator::Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
                        int nz) {
   build(basis, offsets, nx, ny, nz, nullptr);
@@ -219,8 +307,23 @@ Enumerator::Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int 
 // is occupied. Seed selection is decided entirely by lattice geometry;
 // occupancy only filters.
 Enumerator::Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
-                       int nz, const std::vector<uint8_t>& occupancy) {
-  build(basis, offsets, nx, ny, nz, &occupancy);
+                       int nz, const std::vector<uint8_t>& occupancy, const Vec3& origin) {
+  build(basis, offsets, nx, ny, nz, &occupancy, origin);
+}
+
+Enumerator::Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
+                       int nz, const std::vector<uint8_t>& occupancy, PeriodicTag,
+                       const Vec3& origin) {
+  buildPeriodic(basis, offsets, nx, ny, nz, occupancy, origin);
+}
+
+Enumerator Enumerator::occupiedSweep(const Mat3& basis, const std::vector<Vec3>& offsets,
+                                     int nx, int ny, int nz,
+                                     const std::vector<uint8_t>& occupancy,
+                                     const Vec3& origin) {
+  Enumerator e;
+  e.buildFromOccupancy(basis, offsets, nx, ny, nz, occupancy, origin);
+  return e;
 }
 
 Enumerator Enumerator::legacyRadiusSelection(const Mat3& basis, const std::vector<Vec3>& offsets,

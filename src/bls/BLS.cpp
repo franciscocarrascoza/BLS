@@ -51,6 +51,7 @@ struct Analyzer::Impl {
       : lattice(buildLattice(cfg.lattice)),
         dnnVoxel(computeDnnVoxel(cfg)),
         scaledBasis(lattice.basis * (dnnVoxel / lattice.dmin)),
+        latticeSettings(cfg.lattice),
         latticeName(latticeToString(cfg.lattice.lattice)),
         centeringName(centeringToString(cfg.lattice.centering)) {}
 
@@ -58,6 +59,7 @@ struct Analyzer::Impl {
   LatticeDescriptor lattice;
   double dnnVoxel;
   Mat3 scaledBasis;
+  LatticeSettings latticeSettings;
   std::string latticeName;
   std::string centeringName;
 };
@@ -98,7 +100,6 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
 
 bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
                          std::vector<int>* labels) {
-  (void)err;
   ScopedTimer timer;
   const int nx = grid.nx(), ny = grid.ny(), nz = grid.nz();
   const std::vector<uint8_t>& occ = grid.occupancy();
@@ -109,9 +110,25 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
   // timer would give BLS alone a free grid-sized clear (audit S1-2).
   std::fill(visited.begin(), visited.end(), 0);
 
-  Enumerator enumerator(impl_->scaledBasis, impl_->lattice.offsets, nx, ny, nz, occ);
+  // Probe evaluation (§2.1.2, audit D3): the lattice sites inside the grid are evaluated
+  // and the occupied ones seed the refinement. Under PBC the lattice is first made
+  // commensurate with the periodic grid (audit D10) -- per frame, since the grid
+  // dimensions can change between frames -- and the reported dNN is the effective one.
+  const bool periodic = grid.periodicity() == BoxPeriodicity::Periodic;
+  double dnnVoxel = impl_->dnnVoxel;
+  Mat3 basis = impl_->scaledBasis;
+  if (periodic && !commensurateCubicBasis(impl_->latticeSettings, impl_->lattice,
+                                          impl_->dnnVoxel, nx, ny, nz, basis, dnnVoxel, err)) {
+    return false;
+  }
+  const Vec3 latticeOrigin{config_.latticeOrigin[0], config_.latticeOrigin[1],
+                           config_.latticeOrigin[2]};  // deck LATTICE_ORIGIN, voxels
+  const Enumerator enumerator =
+      periodic ? Enumerator(basis, impl_->lattice.offsets, nx, ny, nz, occ,
+                            Enumerator::PeriodicTag{}, latticeOrigin)
+               : Enumerator(basis, impl_->lattice.offsets, nx, ny, nz, occ, latticeOrigin);
 
-  SkipDFSConfig skipCfg{nx, ny, nz, config_.connectivity, config_.refinementStride};
+  SkipDFSConfig skipCfg{nx, ny, nz, config_.connectivity, config_.refinementStride, periodic};
   SkipDFS dfs(skipCfg, occ, visited);
 
   int seeds = 0;
@@ -148,7 +165,7 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
     }
   });
 
-  metrics.dnnVoxel = impl_->dnnVoxel;
+  metrics.dnnVoxel = dnnVoxel;
   metrics.lattice = impl_->latticeName;
   metrics.centering = impl_->centeringName;
   metrics.seeds = seeds;
@@ -156,7 +173,7 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
   metrics.nclusters = nclusters;
   metrics.maxCluster = maxCluster;
   metrics.refinedVoxels = refinedVoxels;
-  metrics.probes = 0;
+  metrics.probes = enumerator.probes();
   std::sort(clusterSizes.begin(), clusterSizes.end(), std::greater<int>());
   metrics.clusterSizes = std::move(clusterSizes);
   metrics.elapsedMs = timer.elapsedMilliseconds();

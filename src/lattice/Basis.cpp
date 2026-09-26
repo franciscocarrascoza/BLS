@@ -1,5 +1,6 @@
 #include "lattice/Basis.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -47,7 +48,9 @@ std::vector<Vec3> centeringOffsets(CenteringType centering) {
   throw std::runtime_error("Unhandled centering type");
 }
 
-double computeDmin(const Mat3& basis, const std::vector<Vec3>& offsets) {
+}  // namespace
+
+double latticeDmin(const Mat3& basis, const std::vector<Vec3>& offsets) {
   double dmin = std::numeric_limits<double>::infinity();
   const int range = 1;
   for (std::size_t i = 0; i < offsets.size(); ++i) {
@@ -72,14 +75,38 @@ double computeDmin(const Mat3& basis, const std::vector<Vec3>& offsets) {
   return dmin;
 }
 
-}  // namespace
-
 LatticeDescriptor buildLattice(const LatticeSettings& settings) {
   LatticeDescriptor desc;
   desc.basis = buildUnitBasis(settings);
   desc.offsets = centeringOffsets(settings.centering);
-  desc.dmin = computeDmin(desc.basis, desc.offsets);
+  desc.dmin = latticeDmin(desc.basis, desc.offsets);
   return desc;
+}
+
+bool commensurateCubicBasis(const LatticeSettings& settings, const LatticeDescriptor& lattice,
+                            double dnnVoxel, int nx, int ny, int nz, Mat3& basis,
+                            double& effectiveDnn, std::string& err) {
+  if (settings.lattice != LatticeType::Cubic) {
+    err = "PBC xyz: the probe lattice must be cubic (P, I or F) to be made commensurate with "
+          "the periodic cell (audit decision D10); " +
+          latticeToString(settings.lattice) + " lattices are not supported under PBC.";
+    return false;
+  }
+  if (!(dnnVoxel > 0.0) || nx < 1 || ny < 1 || nz < 1) {
+    err = "PBC xyz: invalid dNN or grid dimensions for the commensurate probe lattice.";
+    return false;
+  }
+  // Unit cubic basis is the identity, so the conventional edge in voxels is dNN / dmin.
+  const double a = dnnVoxel / lattice.dmin;
+  const int dims[3] = {nx, ny, nz};
+  double edge[3];
+  for (int k = 0; k < 3; ++k) {
+    const int cells = std::max(1, static_cast<int>(std::ceil(dims[k] / a - 1e-9)));
+    edge[k] = static_cast<double>(dims[k]) / cells;
+  }
+  basis = Mat3{Vec3{edge[0], 0.0, 0.0}, Vec3{0.0, edge[1], 0.0}, Vec3{0.0, 0.0, edge[2]}};
+  effectiveDnn = latticeDmin(basis, lattice.offsets);
+  return true;
 }
 
 std::string latticeToString(LatticeType lattice) {

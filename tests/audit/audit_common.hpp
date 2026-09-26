@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <cstdlib>
 #include <random>
 #include <string>
 #include <vector>
@@ -165,6 +166,37 @@ inline std::string subsetViolation(const std::vector<int>& partial, const std::v
   for (const auto& kv : partialToFull)
     if (partialCount[kv.first] != fullCount[kv.second]) return "a partial component is a truncated full component";
   return {};
+}
+
+// Components of a PERIODIC grid (deck PBC xyz) by union-find over the full 6- or
+// 26-stencil with wrap-around: the oracle for every periodic method. Labels are
+// component roots (use canonical() to compare), -1 for empty voxels.
+inline std::vector<int> periodicComponents(const Grid3& g, int connectivity = 6) {
+  std::vector<int> parent(g.size());
+  for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+  auto find = [&](int x) {
+    while (parent[x] != x) x = parent[x] = parent[parent[x]];
+    return x;
+  };
+  for (int i = 0; i < g.nx; ++i)
+    for (int j = 0; j < g.ny; ++j)
+      for (int k = 0; k < g.nz; ++k) {
+        if (!g.at(i, j, k)) continue;
+        for (int di = -1; di <= 1; ++di)
+          for (int dj = -1; dj <= 1; ++dj)
+            for (int dk = -1; dk <= 1; ++dk) {
+              const int m = std::abs(di) + std::abs(dj) + std::abs(dk);
+              if (m == 0 || (connectivity == 6 && m != 1)) continue;
+              const int a = (i + di + g.nx) % g.nx, b = (j + dj + g.ny) % g.ny, c = (k + dk + g.nz) % g.nz;
+              if (!g.at(a, b, c)) continue;
+              const int ra = find(static_cast<int>(g.index(i, j, k))), rb = find(static_cast<int>(g.index(a, b, c)));
+              if (ra != rb) parent[ra] = rb;
+            }
+      }
+  std::vector<int> labels(g.size(), -1);
+  for (std::size_t i = 0; i < g.size(); ++i)
+    if (g.occ[i]) labels[i] = find(static_cast<int>(i));
+  return labels;
 }
 
 // ---------------------------------------------------------------------------
