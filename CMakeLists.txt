@@ -95,12 +95,14 @@ set(core_sources
     src/lattice/Basis.cpp
     src/lattice/Enumerator.cpp
     src/grid/Grid.cpp
+    src/grid/GridSpec.cpp
     src/refine/SkipDFS.cpp
     src/bls/BLS.cpp
     src/bls/Comparison.cpp
     src/cluster/Algorithms.cpp
     src/cluster/UnionFindBasic.cpp
-    src/util/RSS.cpp)
+    src/util/RSS.cpp
+    src/util/Sha256.cpp)
 
 add_library(bls_core STATIC ${core_sources})
 target_include_directories(bls_core PUBLIC src)

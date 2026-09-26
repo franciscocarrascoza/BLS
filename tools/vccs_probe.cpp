@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
 
   Grid grid;
   grid.configure(nx, ny, nz, config.gridSpacing, box, origin,
-                 periodicityForBoxMode(config.boxMode));
+                 periodicityFor(config.pbc));
   grid.rasterize(frame.xyz, nullptr, config.cutoff, config.occupancy);
 
   std::size_t occ = 0;

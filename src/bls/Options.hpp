@@ -63,7 +63,16 @@ struct AtomSelection {
   std::vector<std::string> names;
 };
 
-enum class BoxMode { Auto, Manual };
+// AUTO   -- the trajectory's own cell when usable, else a bounding box fitted to the
+//           (selected) atoms with 2*GRID_SPACING padding; see deriveGridSpec().
+// MANUAL -- the orthorhombic box given by XLO..ZHI in the deck.
+// CELL   -- the frame's own cell (PDB CRYST1, per MODEL), origin (0,0,0); an error if the
+//           frame carries no usable cell. Required for periodic runs on PDB input.
+// Every method -- BLS and all comparison algorithms -- grids the box chosen here through
+// the one shared builder, deriveGridSpec() (grid/GridSpec.hpp). Before the 2026-09-26
+// audit, main.cpp carried its own copy of the AUTO logic and never read MANUAL
+// (Defect 12), so BLS and the comparison methods gridded different boxes.
+enum class BoxMode { Auto, Manual, Cell };
 
 // Whether the analysis box is to be treated as a periodic cell.
 //
@@ -80,20 +89,32 @@ enum class BoxMode { Auto, Manual };
 // opposite faces across vacuum. Periodic is right for a genuine MD cell.
 enum class BoxPeriodicity { NonPeriodic, Periodic };
 
-// Single place where the periodicity of the analysis box is decided, used by
-// both box-derivation sites (bls/BLS.cpp and main.cpp).
+// Periodicity is stated by the deck (keyword PBC), never inferred from the box mode.
+//   PBC none  (default) -- non-periodic in every method; reproduces pre-audit outputs.
+//   PBC xyz             -- periodic along all three cell vectors, in the voxeliser and in
+//                          every method's adjacency. Requires BOX CELL or BOX MANUAL: a
+//                          bounding box synthesised around the atoms is not a periodic cell.
+// Per-axis periodicity (e.g. PBC xy) is rejected by the parser: no method implements it.
 //
-// CAVEAT, deliberate and worth knowing before changing this: BOX AUTO does not
-// always mean a synthesised bounding box. It uses the trajectory's own cell
-// whenever that cell is usable, and only falls back to a bounding box when the
-// cell is missing, degenerate, or implausibly large. So a genuine periodic MD
-// cell arriving through a CRYST1 record is treated as non-periodic here. That
-// costs nothing today -- no clustering algorithm in this codebase has any
-// periodic-boundary handling at all, and in every E0-E5 system every atom lies
-// strictly inside its cell, so no wrap would fire even if it were enabled --
-// but it is the line to revisit if periodic connectivity is ever added.
-inline BoxPeriodicity periodicityForBoxMode(BoxMode mode) {
-  return mode == BoxMode::Manual ? BoxPeriodicity::Periodic : BoxPeriodicity::NonPeriodic;
+// History: until the audit, BOX MANUAL silently implied periodic RASTERISATION while
+// no clustering algorithm had any periodic adjacency, and BOX AUTO treated a genuine
+// CRYST1 cell as non-periodic. Both halves now read this one flag.
+struct PeriodicAxes {
+  bool x{false}, y{false}, z{false};
+  bool any() const { return x || y || z; }
+  bool all() const { return x && y && z; }
+  std::string toString() const {
+    if (!any()) return "none";
+    std::string s;
+    if (x) s += 'x';
+    if (y) s += 'y';
+    if (z) s += 'z';
+    return s;
+  }
+};
+
+inline BoxPeriodicity periodicityFor(const PeriodicAxes& pbc) {
+  return pbc.all() ? BoxPeriodicity::Periodic : BoxPeriodicity::NonPeriodic;
 }
 
 struct ManualBox {
@@ -133,6 +154,12 @@ struct BLSConfig {
   AtomSelection group;
   BoxMode boxMode{BoxMode::Auto};
   ManualBox manualBox{};
+  PeriodicAxes pbc{};  // deck keyword PBC; default none
+  // Deck keyword LATTICE_ORIGIN ox oy oz: translation of the BLS probe lattice, in
+  // voxels, applied to every site before it is rounded to a voxel (modulo the cell
+  // when periodic). Used to sweep lattice-origin offsets without moving atoms, which
+  // would change the rasterised occupancy. Default (0,0,0) = the historical anchoring.
+  double latticeOrigin[3]{0.0, 0.0, 0.0};
   double gridSpacing{0.25};
   int connectivity{6};
   // Config keyword SKIP. BLS's refinement (refine::SkipDFS) advances this many

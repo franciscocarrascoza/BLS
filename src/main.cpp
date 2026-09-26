@@ -17,10 +17,12 @@
 #include "cluster/Algorithms.hpp"
 #include "config/Parser.hpp"
 #include "grid/Grid.hpp"
+#include "grid/GridSpec.hpp"
 #include "io/Topology.hpp"
 #include "io/TrajectoryReader.hpp"
 #include "util/Logging.hpp"
 #include "util/RSS.hpp"
+#include "util/Sha256.hpp"
 #include "util/Timer.hpp"
 
 namespace bls {
@@ -141,12 +143,15 @@ std::vector<int> buildSelection(const BLSConfig& config, const Topology* topo, i
 }
 
 // `replicate` is APPENDED as column 16. The first fifteen columns keep their
-// order and meaning exactly -- the run scripts read nclusters and elapsed_ms by
-// position (cut -f12, -f15), so inserting anywhere but the end would silently
-// shift what those reads return.
+// order -- the run scripts read nclusters and elapsed_ms by position (cut -f12,
+// -f15), so inserting anywhere but the end would silently shift what those reads
+// return. Columns 17-26 were appended by the 2026-09-26 audit: total_ms (the
+// whole-frame scope elapsed_ms had before the audit; elapsed_ms is now the labelling
+// call alone), the grid fingerprint (h_x..occ_sha256) and BLS's probe count.
 void writeCsvHeader(std::ostream& os) {
   os << "frame,time_ps,natoms,NX,NY,NZ,dNN_vox,lattice,centering,seeds,seed_hits,nclusters,"
-        "max_cluster,refined_voxels,elapsed_ms,replicate\n";
+        "max_cluster,refined_voxels,elapsed_ms,replicate,total_ms,h_x,h_y,h_z,origin_x,"
+        "origin_y,origin_z,pbc,occ_sha256,probes\n";
 }
 
 void writeCsvRow(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber,
@@ -154,7 +159,9 @@ void writeCsvRow(std::ostream& os, const FrameMetrics& m, std::size_t frameNumbe
   os << frameNumber << ',' << m.timePs << ',' << m.natoms << ',' << m.nx << ',' << m.ny << ','
      << m.nz << ',' << m.dnnVoxel << ',' << m.lattice << ',' << m.centering << ',' << m.seeds
      << ',' << m.seedHits << ',' << m.nclusters << ',' << m.maxCluster << ','
-     << m.refinedVoxels << ',' << m.elapsedMs << ',' << replicate << '\n';
+     << m.refinedVoxels << ',' << m.elapsedMs << ',' << replicate << ',' << m.totalMs << ','
+     << m.hx << ',' << m.hy << ',' << m.hz << ',' << m.originX << ',' << m.originY << ','
+     << m.originZ << ',' << m.pbc << ',' << m.occSha256 << ',' << m.probes << '\n';
 }
 
 void writeJson(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber) {
@@ -173,7 +180,13 @@ void writeJson(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber)
      << "\"nclusters\":" << m.nclusters << ","
      << "\"max_cluster\":" << m.maxCluster << ","
      << "\"refined_voxels\":" << m.refinedVoxels << ","
-     << "\"elapsed_ms\":" << m.elapsedMs;
+     << "\"elapsed_ms\":" << m.elapsedMs << ","
+     << "\"total_ms\":" << m.totalMs << ","
+     << "\"h\":[" << m.hx << ',' << m.hy << ',' << m.hz << "],"
+     << "\"origin\":[" << m.originX << ',' << m.originY << ',' << m.originZ << "],"
+     << "\"pbc\":\"" << m.pbc << "\","
+     << "\"occ_sha256\":\"" << m.occSha256 << "\","
+     << "\"probes\":" << m.probes;
   if (!m.clusterSizes.empty()) {
     os << ",\"cluster_sizes\":[";
     for (std::size_t i = 0; i < m.clusterSizes.size(); ++i) {
@@ -367,6 +380,7 @@ int main(int argc, char** argv) {
   }
 
   Analyzer analyzer(config);
+  Grid grid;
   bool selectionReady = false;
   std::vector<int> selection;
   std::vector<FrameMetrics> frames;
@@ -416,125 +430,34 @@ int main(int argc, char** argv) {
 
     FrameMetrics metrics;
 
+    // One grid for every method (Defect 12 fix): the box, origin, dimensions and
+    // periodicity come from the shared builder; the voxelisation is identical; the
+    // labelling timer starts only after both, for BLS and for every comparison method.
+    ScopedTimer totalTimer;
+    GridSpec spec;
+    const std::vector<int>* selPtr = selection.empty() ? nullptr : &selection;
+    if (!deriveGridSpec(config, current, selPtr, spec, err)) {
+      std::cerr << "Error: " << err << "\n";
+      return EXIT_FAILURE;
+    }
+    configureGrid(grid, spec);
+    grid.rasterize(current.xyz, selPtr, config.cutoff, config.occupancy);
+
     if (selectedAlgo == ClusterAlgorithm::BLS) {
-      // Use standard BLS processing via Analyzer
-      if (!analyzer.processFrame(current, metrics, err)) {
+      if (!analyzer.labelGrid(grid, metrics, err)) {
         std::cerr << "Processing error: " << err << "\n";
         return EXIT_FAILURE;
       }
     } else {
-      // Use alternative clustering algorithm
-      ScopedTimer timer;
-
-      // Set up grid similar to Analyzer
-      Mat3 activeBox = current.box;
-      Vec3 origin{0.0, 0.0, 0.0};
-
-      auto col0 = activeBox.column(0);
-      auto col1 = activeBox.column(1);
-      auto col2 = activeBox.column(2);
-      double len0 = norm(col0);
-      double len1 = norm(col1);
-      double len2 = norm(col2);
-
-      // Helper lambda to compute coordinate bounds
-      auto computeBounds = [&](Vec3& minPos, Vec3& maxPos) {
-        minPos = Vec3{std::numeric_limits<double>::infinity(),
-                      std::numeric_limits<double>::infinity(),
-                      std::numeric_limits<double>::infinity()};
-        maxPos = Vec3{-std::numeric_limits<double>::infinity(),
-                      -std::numeric_limits<double>::infinity(),
-                      -std::numeric_limits<double>::infinity()};
-        for (const auto& p : current.xyz) {
-          minPos.x = std::min(minPos.x, p.x);
-          minPos.y = std::min(minPos.y, p.y);
-          minPos.z = std::min(minPos.z, p.z);
-          maxPos.x = std::max(maxPos.x, p.x);
-          maxPos.y = std::max(maxPos.y, p.y);
-          maxPos.z = std::max(maxPos.z, p.z);
-        }
-      };
-
-      // Check if box needs correction (zero/invalid or unreasonably large)
-      bool needsBoxCorrection = (len0 < 1e-8 || len1 < 1e-8 || len2 < 1e-8);
-
-      if (!needsBoxCorrection && !current.xyz.empty()) {
-        Vec3 minPos, maxPos;
-        computeBounds(minPos, maxPos);
-
-        double coordExtentX = maxPos.x - minPos.x;
-        double coordExtentY = maxPos.y - minPos.y;
-        double coordExtentZ = maxPos.z - minPos.z;
-
-        // If box is more than 10x larger than coordinate extent, it's likely incorrect
-        const double suspiciousRatio = 10.0;
-        bool boxTooLarge = (len0 > coordExtentX * suspiciousRatio) ||
-                           (len1 > coordExtentY * suspiciousRatio) ||
-                           (len2 > coordExtentZ * suspiciousRatio);
-
-        if (boxTooLarge) {
-          Logger::warn("Box size (", len0, " x ", len1, " x ", len2,
-                       ") is unreasonably large compared to coordinate extent (",
-                       coordExtentX, " x ", coordExtentY, " x ", coordExtentZ,
-                       "). Auto-correcting to fit coordinates.");
-          needsBoxCorrection = true;
-        }
-      }
-
-      if (needsBoxCorrection && !current.xyz.empty()) {
-        Vec3 minPos, maxPos;
-        computeBounds(minPos, maxPos);
-        double padding = config.gridSpacing * 2.0;
-        origin = minPos;
-        activeBox = Mat3{Vec3{std::max(maxPos.x - minPos.x + padding, padding), 0.0, 0.0},
-                         Vec3{0.0, std::max(maxPos.y - minPos.y + padding, padding), 0.0},
-                         Vec3{0.0, 0.0, std::max(maxPos.z - minPos.z + padding, padding)}};
-        col0 = activeBox.column(0);
-        col1 = activeBox.column(1);
-        col2 = activeBox.column(2);
-      }
-
-      int nx = std::max(1, static_cast<int>(std::ceil(norm(col0) / config.gridSpacing)));
-      int ny = std::max(1, static_cast<int>(std::ceil(norm(col1) / config.gridSpacing)));
-      int nz = std::max(1, static_cast<int>(std::ceil(norm(col2) / config.gridSpacing)));
-
-      // Check memory requirements before allocation
-      std::size_t requiredMemory = estimateGridMemoryBytes(nx, ny, nz);
-      std::size_t availableMemory = availableSystemRAMBytes();
-      std::size_t maxAllowedMemory = static_cast<std::size_t>(availableMemory * 0.8);
-
-      if (requiredMemory > maxAllowedMemory) {
-        std::cerr << "Error: Grid allocation would require "
-                  << (requiredMemory / (1024.0 * 1024.0 * 1024.0)) << " GB, "
-                  << "which exceeds available RAM limit ("
-                  << (maxAllowedMemory / (1024.0 * 1024.0 * 1024.0)) << " GB).\n";
-        std::cerr << "Grid dimensions: " << nx << " x " << ny << " x " << nz << " = "
-                  << (static_cast<std::size_t>(nx) * ny * nz) << " voxels\n";
-        std::cerr << "Box size: " << norm(col0) << " x " << norm(col1) << " x " << norm(col2)
-                  << " Angstroms\n";
-        std::cerr << "Grid spacing: " << config.gridSpacing << " Angstroms\n\n";
-        std::cerr << "Solutions:\n";
-        std::cerr << "  1. Increase GRID_SPACING (current: " << config.gridSpacing << " A)\n";
-        double minSpacing = std::max({norm(col0), norm(col1), norm(col2)}) /
-                            maxBoxDimensionForRAM(1.0, maxAllowedMemory);
-        std::cerr << "     Minimum spacing for this box: " << minSpacing << " A\n";
-        std::cerr << "  2. Reduce box size (check CRYST1 record in PDB or use BOX MANUAL)\n";
-        double maxBoxSize = maxBoxDimensionForRAM(config.gridSpacing, maxAllowedMemory);
-        std::cerr << "     Maximum box dimension for current spacing: " << maxBoxSize << " A\n";
+      if (spec.pbc.any()) {
+        std::cerr << "Error: PBC is not implemented for " << algorithmToString(selectedAlgo)
+                  << "\n";
         return EXIT_FAILURE;
       }
-
-      Grid grid;
-      grid.configure(nx, ny, nz, config.gridSpacing, activeBox, origin,
-                     periodicityForBoxMode(config.boxMode));
-      const std::vector<int>* selPtr = selection.empty() ? nullptr : &selection;
-      grid.rasterize(current.xyz, selPtr, config.cutoff, config.occupancy);
-
-      // Set up algorithm parameters
       ClusterParams params;
-      params.nx = nx;
-      params.ny = ny;
-      params.nz = nz;
+      params.nx = spec.nx;
+      params.ny = spec.ny;
+      params.nz = spec.nz;
       params.skipDfsJumpDistance = opts.skipDfsJumpDistance;
       params.eps = opts.algoEps;
       params.minPts = opts.algoMinPts;
@@ -545,16 +468,11 @@ int main(int argc, char** argv) {
       params.minClusterSize = opts.algoMinClusterSize;
       params.minSamples = opts.algoMinSamples;
 
-      // Run the selected algorithm
-      ClusterResult result = runClusterAlgorithm(
-          selectedAlgo, params, grid.occupancy(), grid.visited());
+      ScopedTimer labelTimer;
+      ClusterResult result =
+          runClusterAlgorithm(selectedAlgo, params, grid.occupancy(), grid.visited());
+      metrics.elapsedMs = labelTimer.elapsedMilliseconds();
 
-      // Fill metrics
-      metrics.timePs = current.time;
-      metrics.natoms = current.natoms;
-      metrics.nx = nx;
-      metrics.ny = ny;
-      metrics.nz = nz;
       metrics.dnnVoxel = 0.0;  // Not applicable for non-BLS algorithms
       metrics.lattice = algorithmToString(selectedAlgo);
       metrics.centering = "-";
@@ -564,8 +482,23 @@ int main(int argc, char** argv) {
       metrics.maxCluster = result.maxCluster;
       metrics.refinedVoxels = result.visitedVoxels;
       metrics.clusterSizes = std::move(result.clusterSizes);
-      metrics.elapsedMs = timer.elapsedMilliseconds();
     }
+    metrics.totalMs = totalTimer.elapsedMilliseconds();
+
+    metrics.timePs = current.time;
+    metrics.natoms = current.natoms;
+    metrics.nx = spec.nx;
+    metrics.ny = spec.ny;
+    metrics.nz = spec.nz;
+    // Fingerprint, outside both timers.
+    metrics.hx = spec.h(0);
+    metrics.hy = spec.h(1);
+    metrics.hz = spec.h(2);
+    metrics.originX = spec.origin.x;
+    metrics.originY = spec.origin.y;
+    metrics.originZ = spec.origin.z;
+    metrics.pbc = spec.pbc.toString();
+    metrics.occSha256 = occupancySha256(grid.occupancy());
 
     metrics.frameIndex = frameIndex;
 

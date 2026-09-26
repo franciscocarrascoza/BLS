@@ -158,23 +158,60 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
           }
         }
       } else if (upperKeyword == "BOX") {
-        auto tokens = split(rest, ' ');
-        if (!tokens.empty() && toUpper(tokens[0]) == "AUTO") {
+        // BOX AUTO | BOX CELL | BOX [MANUAL] XLO v XHI v YLO v YHI v ZLO v ZHI v
+        // The manual form used to accept anything: a leading MANUAL token shifted the
+        // key/value pairing so every bound silently stayed 0, and unknown keys were
+        // ignored (audit HARN-2). All six bounds are now required and checked.
+        std::vector<std::string> tokens;
+        {
+          std::istringstream ts(rest);
+          std::string t;
+          while (ts >> t) tokens.push_back(t);
+        }
+        const std::string head = tokens.empty() ? std::string() : toUpper(tokens[0]);
+        if (head == "AUTO" && tokens.size() == 1) {
           config.boxMode = BoxMode::Auto;
+        } else if (head == "CELL" && tokens.size() == 1) {
+          config.boxMode = BoxMode::Cell;
         } else {
           config.boxMode = BoxMode::Manual;
           std::unordered_map<std::string, double*> keyMap = {
               {"XLO", &config.manualBox.xlo}, {"XHI", &config.manualBox.xhi},
               {"YLO", &config.manualBox.ylo}, {"YHI", &config.manualBox.yhi},
               {"ZLO", &config.manualBox.zlo}, {"ZHI", &config.manualBox.zhi}};
-          for (std::size_t i = 0; i + 1 < tokens.size(); i += 2) {
+          std::size_t first = (head == "MANUAL") ? 1 : 0;
+          if ((tokens.size() - first) != 12) {
+            throw std::runtime_error(
+                "BOX expects AUTO, CELL, or [MANUAL] XLO v XHI v YLO v YHI v ZLO v ZHI v");
+          }
+          std::unordered_map<std::string, bool> seen;
+          for (std::size_t i = first; i + 1 < tokens.size(); i += 2) {
             auto key = toUpper(tokens[i]);
             auto it = keyMap.find(key);
-            if (it != keyMap.end()) {
-              *(it->second) = std::stod(tokens[i + 1]);
+            if (it == keyMap.end() || seen[key]) {
+              throw std::runtime_error("BOX: unknown or repeated bound '" + tokens[i] + "'");
             }
+            seen[key] = true;
+            *(it->second) = std::stod(tokens[i + 1]);
           }
         }
+      } else if (upperKeyword == "PBC") {
+        const std::string v = toUpper(trim(rest));
+        if (v == "NONE") {
+          config.pbc = PeriodicAxes{};
+        } else if (v == "XYZ") {
+          config.pbc = PeriodicAxes{true, true, true};
+        } else {
+          throw std::runtime_error("PBC expects 'xyz' or 'none' (per-axis periodicity is not "
+                                   "implemented by any method)");
+        }
+      } else if (upperKeyword == "LATTICE_ORIGIN") {
+        std::istringstream ts(rest);
+        double o[3];
+        if (!(ts >> o[0] >> o[1] >> o[2])) {
+          throw std::runtime_error("LATTICE_ORIGIN expects three numbers (voxels)");
+        }
+        for (int k = 0; k < 3; ++k) config.latticeOrigin[k] = o[k];
       } else if (upperKeyword == "GRID_SPACING") {
         config.gridSpacing = std::stod(rest);
       } else if (upperKeyword == "CONNECTIVITY") {
@@ -249,6 +286,13 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
           "    LATTICE cubic\n"
           "    CENTERING F\n"
           "(LATTICE: cubic | hexagonal | triclinic. CENTERING: P | F | I.)";
+    return false;
+  }
+
+  if (config.pbc.any() && config.boxMode == BoxMode::Auto) {
+    err = "PBC xyz needs a periodic cell: use BOX CELL (the file's CRYST1 cell) or BOX "
+          "MANUAL. BOX AUTO may synthesise a bounding box around the atoms, which is not a "
+          "periodic cell.";
     return false;
   }
 

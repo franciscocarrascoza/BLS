@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
   const int nz = std::max(1, (int)std::ceil(cell.z / gs));
   Grid grid;
   grid.configure(nx, ny, nz, gs, frame.box, Vec3{0, 0, 0},
-                 periodicityForBoxMode(config.boxMode));
+                 periodicityFor(config.pbc));
   grid.rasterize(frame.xyz, nullptr, config.cutoff, config.occupancy);
 
   ClusterParams params;
