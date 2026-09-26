@@ -121,7 +121,7 @@ for a in cc3d rle_ccl vccs dbscan hdbscan kmeans hierarchical; do
         "$a ran under PBC xyz (rc=$rc)"
 done
 # vccs_optimized (WP4) runs under PBC and, as a segmentation, covers every occupied voxel.
-run_algo pbc.in vccs.csv vccs_optimized --algo-connectivity 26; rc=$?
+run_algo pbc.in vccs.csv vccs_optimized; rc=$?  # 26-adjacency is part of the method (paper §3.1)
 check E2E-REFUSE "$([[ $rc == 0 && $(col vccs.csv 24) == xyz && $(col vccs.csv 14) == $(col pbc.csv 14) ]] && echo 1)" \
       "vccs_optimized under PBC xyz: rc=$rc pbc='$(col vccs.csv 24)' covered $(col vccs.csv 14) of $(col pbc.csv 14) $(cat "$WORK/stderr_vccs.csv.log")"
 run pbc_hex.in hex.csv bls; rc=$?

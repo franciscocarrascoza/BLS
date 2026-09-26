@@ -24,7 +24,7 @@ enum class ClusterAlgorithm {
   RLECCL,        // Run-Length Encoding CCL (textbook: per-voxel union-find)
   RLECCLOptimized,  // RLE-CCL with runs, not voxels, as the union-find domain
   VCCS,          // Voxel Cloud Connected Segmentation (textbook: uniform seeds)
-  VCCSOptimized  // VCCS in its published (PCL) form: seeding, pruning, iterative growth
+  VCCSOptimized  // VCCS as published (Papon et al., CVPR 2013)
 };
 
 // Convert string to algorithm enum
@@ -51,9 +51,10 @@ struct ClusterResult {
   //   seedCandidates     - fair: seed-grid points examined.
   //                        optimized: seed cells containing structure.
   //   seedsPlaced        - candidates that became a supervoxel seed.
-  //   seedPruneThreshold - optimized: PCL's min_points = 0.05*pi*(S/2)^2; a
-  //                        candidate survives iff its occupied neighbours within
-  //                        R_search = S/2 are MORE than this. 0 in the fair
+  //   seedPruneThreshold - optimized: the paper's filter, pi*R_search^2 voxels
+  //                        (a planar slice through the search volume, R_search =
+  //                        S/2); a candidate survives iff at least this many
+  //                        occupied voxels lie within R_search. 0 in the fair
   //                        track, which does not prune.
   int seedCandidates{0};
   int seedsPlaced{0};
@@ -226,17 +227,16 @@ ClusterResult vccs(
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited);
 
-// VCCS Optimized - pcl::SupervoxelClustering (Papon et al., CVPR 2013; PCL,
-// BSD-3-Clause, see THIRD_PARTY_NOTICES.md) ported onto the grid: nearest-to-centre
-// seeding, PCL's seed pruning, iterative centroid-distance growth with re-assignment
-// (audit decision D6, findings VCCS-1/2/5/6). Growth adjacency = `connectivity`
-// (PCL: 26). See the definition for what is deliberately omitted and why.
+// VCCS Optimized - Voxel Cloud Connectivity Segmentation as published: Papon, Abramov,
+// Schoeler & Woergoetter, CVPR 2013, doi:10.1109/CVPR.2013.264, §3.1-3.4 (audit decision D6
+// revised): 26-adjacency, nearest-to-centre seeding, planar-slice seed filter, BFS flow
+// with per-level interleaving of supervoxels, centre updates, at most 5 iterations. Spatial
+// distance term only (no colour or normals on an occupancy grid). See the definition.
 ClusterResult vccsOptimized(
     int nx, int ny, int nz,
     double seedResolution,
     const std::vector<uint8_t>& occupancy,
     std::vector<uint8_t>& visited,
-    int connectivity = 26,
     bool periodic = false);
 
 }  // namespace bls

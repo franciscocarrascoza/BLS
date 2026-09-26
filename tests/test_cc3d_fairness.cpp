@@ -12,9 +12,12 @@
 // (Papon et al. 2013), which by construction moves seeds the fair track does
 // not move and drops seeds the fair track keeps. Demanding identical output
 // would be demanding that the optimization do nothing. What IS required of the
-// pair, and asserted below, is that both partition exactly the occupied set,
-// that every supervoxel is 6-connected, and that neither ever merges two
-// distinct connected components into one supervoxel.
+// pair, and asserted below, is that both partition exactly the occupied set
+// and that neither ever merges two distinct connected components into one
+// supervoxel -- components under the method's OWN adjacency: 26 for
+// vccs_optimized, which follows the paper (Papon et al. 2013, §3.1: "whenever
+// we refer to adjacent voxels, we are speaking of 26-adjacency"; audit decision
+// D6 revised), 6 for the withdrawn textbook track.
 //
 // Test geometry is deliberately not just axis-aligned cubes. Both major defects
 // in this codebase survived because cubic, symmetric cases hid them, so the
@@ -213,10 +216,12 @@ void checkSegmentation(const Grid& g, ClusterAlgorithm a) {
   check(sum == occCount, tag + ": cluster sizes sum to " + std::to_string(sum) + ", occupied is " +
                              std::to_string(occCount));
 
-  // 2. a segmentation refines the connected components: it may split a
-  //    component into several supervoxels, but must never span two.
+  // 2. a segmentation refines the connected components of its own adjacency: it
+  //    may split a component into several supervoxels, but must never span two.
   std::vector<int> dfsLab;
-  ClusterResult dfs = run(ClusterAlgorithm::TraditionalDFS, g, 6, &dfsLab);
+  ClusterResult dfs = (a == ClusterAlgorithm::VCCSOptimized)
+                          ? run(ClusterAlgorithm::CC3DOptimized, g, 26, &dfsLab)
+                          : run(ClusterAlgorithm::TraditionalDFS, g, 6, &dfsLab);
   check(r.nclusters >= dfs.nclusters,
         tag + ": produced " + std::to_string(r.nclusters) + " supervoxels, fewer than the " +
             std::to_string(dfs.nclusters) + " connected components -- it merged components");

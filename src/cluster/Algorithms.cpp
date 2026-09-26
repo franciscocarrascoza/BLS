@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -215,7 +216,7 @@ ClusterResult runClusterAlgorithm(
       return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
     case ClusterAlgorithm::VCCSOptimized:
       return vccsOptimized(params.nx, params.ny, params.nz, params.eps, occupancy, visited,
-                           params.connectivity, params.periodic);
+                           params.periodic);
   }
   throw std::runtime_error("Unhandled algorithm type");
 }
@@ -1918,50 +1919,59 @@ namespace {
 
 // ── VCCS, optimized track ────────────────────────────────────────────────────
 //
-// PORTED rather than linked: PCL 1.14 pulls in Boost, Eigen, FLANN and VTK for one
-// comparison algorithm, this build has no mandatory external dependency, and PCL's entry
-// point takes a PointCloud<PointXYZRGBA> with estimated normals -- the adapter from a
-// binary voxel grid would be more code than the algorithm. No grid-sized array is
-// allocated: the occupied voxels are collected once into a raster-ordered list and every
-// per-voxel state is indexed by position in it (voxel index -> position is a binary search).
-// PCL's octree adjacency graph is not ported either: on a regular grid a voxel's
-// neighbours are index arithmetic away.
+// Voxel Cloud Connectivity Segmentation as PUBLISHED: J. Papon, A. Abramov, M. Schoeler,
+// F. Wörgötter, "Voxel Cloud Connectivity Segmentation - Supervoxels for Point Clouds",
+// CVPR 2013, doi:10.1109/CVPR.2013.264, §3.1-3.4 (audit decision D6 revised: the method
+// follows the paper, not PCL's SupervoxelClustering code, which departs from it). The
+// voxel grid is the paper's voxel cloud with R_voxel = 1 voxel; R_seed = S voxels.
 //
-// VCCS in its published form (audit decision D6; findings VCCS-1, -2, -5, -6):
-// a port of PCL's SupervoxelClustering (Papon et al., CVPR 2013; PCL
-// segmentation/impl/supervoxel_clustering.hpp, BSD-3-Clause, see THIRD_PARTY_NOTICES.md)
-// onto the occupancy grid, with the voxel resolution = 1 voxel and the spatial
-// distance term only (every voxel here is identical apart from its position, so
-// PCL's colour and normal terms carry no information; manuscript l.446-450).
+//   §3.1 adjacency   26-adjacency ("whenever we refer to adjacent voxels, we are speaking
+//                    of 26-adjacency").
+//   §3.2 seeding     one candidate per occupied seed voxel (S^3 cell): "the voxel in the
+//                    cloud nearest to the center of each occupied seeding voxel".
+//        filtering   delete candidates that do "not have at least as many voxels as would be
+//                    occupied by a planar surface intersecting with half of the search volume":
+//                    kept iff #{occupied v : |v - c| <= R_search} >= pi R_search^2 / R_voxel^2.
+//                    The paper gives no value for R_search; 0.5 R_seed is taken from PCL (by
+//                    the paper's first author), as is area/voxel-area for "voxels occupied by
+//                    a planar slice" -- without PCL's extra factor 0.05, which PCL itself
+//                    notes is "smaller than the value mentioned in the original paper".
+//        seed shift  "to the connected voxel within the search volume which has the smallest
+//                    gradient", the gradient being a CIELab colour gradient (eq. 2). On a
+//                    binary occupancy grid there is no colour, the gradient is 0 everywhere
+//                    and the seed stays where it is.
+//   §3.3 centre      initialised as "the center ... of the seed voxel and connected neighbors
+//                    within 2 voxels" (read: occupied voxels within 2 steps of the seed in the
+//                    adjacency graph). Distance D (eq. 4) keeps only its spatial term: colour
+//                    (D_c) and FPFH (D_HiK) need colour and surface normals, which a binary
+//                    occupancy grid does not have; D is then proportional to |v - centre|.
+//        search      limited "so that it ends at the neighboring cluster centers", the farthest
+//        volume      point lying at sqrt(3) R_seed: the cube |v - centre|_k <= R_seed per axis.
+//   §3.4 flow        per iteration, per supervoxel, a breadth-first search of the adjacency
+//                    graph from "the voxel nearest the cluster center", one level at a time for
+//                    ALL supervoxels before going deeper. A voxel reached takes the label "if the
+//                    distance is the smallest this voxel has seen"; only then are its neighbours
+//                    "which are further from the center" added to this supervoxel's queue,
+//                    never twice in one iteration. A supervoxel's search ends when it runs out
+//                    of voxels or "none of the nodes searched in the current level were set to
+//                    its label". Then every centre becomes "the mean of all its constituents".
+//        iterations  "until the cluster centers stabilize, or for a fixed number of iterations
+//                    ... five iterations for all presented results": at most 5, stopping early
+//                    when no centre moves (the next iteration would repeat this one).
 //
-//   seeding   one candidate per occupied seed cell (edge S voxels): the occupied voxel
-//             nearest the cell centre, over ALL occupied voxels (PCL: kd-tree nearest to
-//             the seed-octree leaf centre); candidates chosen twice are kept once.
-//   pruning   keep a candidate iff  #{occupied v : |v - c|^2 < R^2} > 0.05*pi*R^2,
-//             R = S/2 (PCL selectInitialSupervoxelSeeds; strict < as FLANN's radius search).
-//   growth    max_depth = int(1.8*S); for i = 1 .. max_depth-1: every supervoxel, in seed
-//             order, scans the neighbours (PCL: 26; here the method's connectivity, see
-//             below) of all its voxels and takes a neighbour whose
-//             distance to the supervoxel's CENTROID is below the neighbour's recorded
-//             distance (taking it from its previous owner); then empty supervoxels are
-//             dropped and centroids recomputed (PCL expandSupervoxels / SupervoxelHelper::
-//             expand / updateCentroid). As in PCL, a seed voxel's recorded distance starts
-//             at +inf, so a neighbouring supervoxel may take it.
-//   output    one cluster per non-empty supervoxel. Voxels no supervoxel reached (PCL leaves
-//             them unlabelled) are promoted, one cluster per connected remainder, so that
-//             every method is tallied on the same terms (a coverage gap shows up as extra
-//             clusters, not as missing voxels).
+// Readings stated because the paper does not spell them out: "smallest this voxel has seen"
+// restarts every iteration (the local k-means of SLIC [1], which §3.4 builds on); ties keep
+// the earlier supervoxel; supervoxels and queues are processed in voxel-index order.
+// Voxels no search reaches stay unlabelled in the paper; here each 26-connected remainder
+// becomes one cluster so that every method is tallied over the same occupied set.
+// Under PBC xyz adjacency wraps and every distance is a minimum image; the seed-cell grid is
+// not periodic (a cell cut by a face is a smaller cell).
 //
-// Deliberate differences from PCL, all forced by determinism or the voxel grid: voxels of a
-// supervoxel are visited in voxel-index order (PCL: a pointer-ordered std::set, i.e. memory
-// layout); seed cells are aligned with the grid, [cS, cS+S-1] (PCL: the seed octree's
-// bounding box, itself an arbitrary alignment); distances are in voxels, not scaled by spatial_importance/S
-// (a common positive factor, so every comparison is unchanged).
-// Under PBC xyz (Periodic) adjacency wraps, and every distance and centroid is taken with
-// the minimum image; the seed-cell grid is not periodic (PCL has no PBC; a cell cut by a face
-// is simply a smaller cell).
+// Implementation: no grid-sized array; the occupied voxels are listed once in raster order
+// and all per-voxel state is indexed by position in that list (voxel -> position by binary
+// search).
 template <bool Periodic>
-ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution, int connectivity,
+ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution,
                                 const std::vector<uint8_t>& occupancy,
                                 std::vector<uint8_t>& visited) {
   ScopedTimer timer;
@@ -1971,20 +1981,7 @@ ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution, i
   std::fill(visited.begin(), visited.end(), 0);
 
   const int S = std::max(1, static_cast<int>(std::round(seedResolution)));
-  // Growth / remainder adjacency: PCL's is 26 (face, edge, vertex). Here it is the
-  // method's connectivity (6, 18 or 26) so the caller decides whether VCCS refines the
-  // same components the exact methods label (6) or PCL's (26); see decision D6.
-  std::vector<std::array<int, 3>> nbr;
-  for (int di = -1; di <= 1; ++di)
-    for (int dj = -1; dj <= 1; ++dj)
-      for (int dk = -1; dk <= 1; ++dk) {
-        const int m = std::abs(di) + std::abs(dj) + std::abs(dk);
-        if (m == 0 || (connectivity == 6 && m != 1) || (connectivity == 18 && m == 3)) continue;
-        nbr.push_back({di, dj, dk});
-      }
 
-  // The one pass over the occupancy array. Raster order, so `occVox` comes out
-  // sorted and can be binary-searched without an explicit sort.
   std::vector<int> occVox;
   for (std::size_t i = 0; i < totalSize; ++i) {
     if (occupancy[i] == 1) occVox.push_back(static_cast<int>(i));
@@ -2001,13 +1998,13 @@ ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution, i
     return static_cast<int>(it - occVox.begin());
   };
   const int planeYZ = ny * nz;
-  auto decode = [&](int voxIdx, int& i, int& j, int& k) {
-    i = voxIdx / planeYZ;
-    const int rem = voxIdx - i * planeYZ;
-    j = rem / nz;
-    k = rem % nz;
-  };
-  // Neighbour / offset voxel -> compact index, -1 when outside (non-periodic) or empty.
+  std::vector<std::array<int, 3>> pos(static_cast<std::size_t>(nOcc));
+  for (int c = 0; c < nOcc; ++c) {
+    const int v = occVox[static_cast<std::size_t>(c)];
+    const int i = v / planeYZ, rem = v - i * planeYZ;
+    pos[static_cast<std::size_t>(c)] = {i, rem / nz, rem % nz};
+  }
+  // Occupied voxel at (i,j,k) -> position in the list, -1 if empty or (non-periodic) outside.
   auto occupiedAt = [&](int i, int j, int k) -> int {
     if constexpr (Periodic) {
       i = ((i % nx) + nx) % nx;
@@ -2019,164 +2016,234 @@ ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution, i
     const int v = static_cast<int>(idx3(i, j, k, ny, nz));
     return occupancy[static_cast<std::size_t>(v)] == 1 ? compactOf(v) : -1;
   };
-  // Displacement a - b along one axis of length n (minimum image under PBC).
+  const int dims[3] = {nx, ny, nz};
   auto delta = [](double a, double b, int n) {
     double d = a - b;
     if constexpr (Periodic) d -= n * std::round(d / n);
     return d;
   };
-  auto dist2 = [&](double ai, double aj, double ak, double bi, double bj, double bk) {
-    const double di = delta(ai, bi, nx), dj = delta(aj, bj, ny), dk = delta(ak, bk, nz);
-    return di * di + dj * dj + dk * dk;
+  using P3 = std::array<double, 3>;
+  auto dist2 = [&](int c, const P3& p) {
+    const auto& q = pos[static_cast<std::size_t>(c)];
+    double s = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      const double d = delta(q[a], p[a], dims[a]);
+      s += d * d;
+    }
+    return s;
+  };
+  std::vector<std::array<int, 3>> adj26;
+  for (int di = -1; di <= 1; ++di)
+    for (int dj = -1; dj <= 1; ++dj)
+      for (int dk = -1; dk <= 1; ++dk)
+        if (di || dj || dk) adj26.push_back({di, dj, dk});
+  // Nearest occupied voxel to p: an initial guess bounds the cube that must be searched.
+  auto nearestTo = [&](const P3& p, int guess) {
+    int best = guess;
+    double bestD2 = dist2(guess, p);
+    const int reach = static_cast<int>(std::ceil(std::sqrt(bestD2))) + 1;
+    const int ci = static_cast<int>(std::floor(p[0])), cj = static_cast<int>(std::floor(p[1])),
+              ck = static_cast<int>(std::floor(p[2]));
+    for (int i = ci - reach; i <= ci + reach + 1; ++i)
+      for (int j = cj - reach; j <= cj + reach + 1; ++j)
+        for (int k = ck - reach; k <= ck + reach + 1; ++k) {
+          const int c = occupiedAt(i, j, k);
+          if (c < 0 || c == best) continue;
+          const double d2 = dist2(c, p);
+          if (d2 < bestD2 || (d2 == bestD2 && c < best)) { best = c; bestD2 = d2; }
+        }
+    return best;
   };
 
-  // --- 1. seeding: nearest occupied voxel to each occupied seed-cell centre ------------
-  // Seed cells are the S^3 blocks [cS, cS+S-1] per axis, centre cS + (S-1)/2 in voxel-
-  // centre coordinates. The best voxel inside the cell bounds the search: only voxels
-  // strictly closer to the centre (or as close, with a smaller index) can replace it,
-  // and they lie in the cube of that radius around the centre.
+  // --- §3.2 seeding: nearest occupied voxel to each occupied seed-cell centre -------------
   std::vector<std::pair<std::array<int, 3>, int>> byCell;
   byCell.reserve(static_cast<std::size_t>(nOcc));
   for (int c = 0; c < nOcc; ++c) {
-    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
-    byCell.push_back({{i / S, j / S, k / S}, c});
+    const auto& q = pos[static_cast<std::size_t>(c)];
+    byCell.push_back({{q[0] / S, q[1] / S, q[2] / S}, c});
   }
   std::sort(byCell.begin(), byCell.end());
   std::vector<int> candidates;
   const double half = 0.5 * (S - 1);
   for (std::size_t g = 0; g < byCell.size();) {
     const auto cell = byCell[g].first;
-    const double cx = cell[0] * S + half, cy = cell[1] * S + half, cz = cell[2] * S + half;
-    int best = -1;
-    double bestD2 = 0.0;
-    for (; g < byCell.size() && byCell[g].first == cell; ++g) {
-      const int c = byCell[g].second;
-      int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
-      const double d2 = dist2(i, j, k, cx, cy, cz);
-      if (best < 0 || d2 < bestD2 || (d2 == bestD2 && c < best)) { best = c; bestD2 = d2; }
-    }
-    const int reach = static_cast<int>(std::ceil(std::sqrt(bestD2))) + 1;
-    const int ci = static_cast<int>(std::floor(cx)), cj = static_cast<int>(std::floor(cy)),
-              ck = static_cast<int>(std::floor(cz));
-    for (int i = ci - reach; i <= ci + reach + 1; ++i)
-      for (int j = cj - reach; j <= cj + reach + 1; ++j)
-        for (int k = ck - reach; k <= ck + reach + 1; ++k) {
-          const int c = occupiedAt(i, j, k);
-          if (c < 0 || c == best) continue;
-          int vi, vj, vk; decode(occVox[static_cast<std::size_t>(c)], vi, vj, vk);
-          const double d2 = dist2(vi, vj, vk, cx, cy, cz);
-          if (d2 < bestD2 || (d2 == bestD2 && c < best)) { best = c; bestD2 = d2; }
-        }
-    candidates.push_back(best);
+    const P3 centre{cell[0] * S + half, cell[1] * S + half, cell[2] * S + half};
+    const int first = byCell[g].second;
+    while (g < byCell.size() && byCell[g].first == cell) ++g;
+    candidates.push_back(nearestTo(centre, first));
   }
-  // Two cells can pick the same voxel; PCL would then give one voxel to two helpers
-  // (the second addLeaf wins the owner). One supervoxel per voxel is kept.
   std::sort(candidates.begin(), candidates.end());
   candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
 
-  // --- 2. pruning (PCL selectInitialSupervoxelSeeds) ----------------------------------
+  // --- §3.2 filtering ---------------------------------------------------------------------
   const double rSearch = 0.5 * S;
-  const double minPoints = 0.05 * rSearch * rSearch * 3.1415926536;
-  const int reachR = static_cast<int>(std::ceil(rSearch));
-  std::vector<int> seeds;
-  seeds.reserve(candidates.size());
+  const double minVoxels = 3.14159265358979323846 * rSearch * rSearch;
+  const int reachR = static_cast<int>(std::floor(rSearch));
+  std::vector<int> seeds, within;
   for (int c : candidates) {
-    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
-    int num = 0;
+    const auto& q = pos[static_cast<std::size_t>(c)];
+    const P3 qc{double(q[0]), double(q[1]), double(q[2])};
+    within.clear();
     for (int di = -reachR; di <= reachR; ++di)
       for (int dj = -reachR; dj <= reachR; ++dj)
         for (int dk = -reachR; dk <= reachR; ++dk) {
-          if (di * di + dj * dj + dk * dk >= rSearch * rSearch) continue;  // strict, as FLANN
-          if (occupiedAt(i + di, j + dj, k + dk) >= 0) ++num;
+          const int u = occupiedAt(q[0] + di, q[1] + dj, q[2] + dk);
+          if (u >= 0 && dist2(u, qc) <= rSearch * rSearch) within.push_back(u);
         }
-    if (num > minPoints) seeds.push_back(c);
+    // Distinct voxels: in a periodic axis shorter than 2 R_search two offsets reach one voxel.
+    std::sort(within.begin(), within.end());
+    const auto count = std::unique(within.begin(), within.end()) - within.begin();
+    if (count >= minVoxels) seeds.push_back(c);
   }
   result.seedCandidates = static_cast<int>(candidates.size());
   result.seedsPlaced = static_cast<int>(seeds.size());
-  result.seedPruneThreshold = minPoints;
+  result.seedPruneThreshold = minVoxels;
 
-  // --- 3. growth (PCL expandSupervoxels) -----------------------------------------------
+  // --- §3.3 initial centres: seed and connected neighbours within 2 steps -----------------
   const int nSv = static_cast<int>(seeds.size());
-  std::vector<int> owner(static_cast<std::size_t>(nOcc), -1);
-  std::vector<double> distance(static_cast<std::size_t>(nOcc), std::numeric_limits<double>::max());
-  std::vector<std::set<int>> leaves(static_cast<std::size_t>(nSv));
-  std::vector<std::array<double, 3>> centroid(static_cast<std::size_t>(nSv));
+  std::vector<P3> centre(static_cast<std::size_t>(nSv));
   std::vector<char> alive(static_cast<std::size_t>(nSv), 1);
-  for (int s = 0; s < nSv; ++s) {
-    const int c = seeds[static_cast<std::size_t>(s)];
-    leaves[static_cast<std::size_t>(s)].insert(c);  // addLeaf: owner set, distance left at +inf
-    owner[static_cast<std::size_t>(c)] = s;
-    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
-    centroid[static_cast<std::size_t>(s)] = {double(i), double(j), double(k)};
-  }
-
-  const int maxDepth = static_cast<int>(1.8 * S);
-  std::vector<int> newOwned;
-  for (int round = 1; round < maxDepth; ++round) {
+  std::vector<int> nearGuess(seeds);  // a voxel near each centre, to start nearestTo()
+  {
+    std::vector<int> mark(static_cast<std::size_t>(nOcc), -1), layer, next, members;
     for (int s = 0; s < nSv; ++s) {
-      if (!alive[static_cast<std::size_t>(s)]) continue;
-      newOwned.clear();
-      const auto& cen = centroid[static_cast<std::size_t>(s)];
-      for (int leaf : leaves[static_cast<std::size_t>(s)]) {
-        int i, j, k; decode(occVox[static_cast<std::size_t>(leaf)], i, j, k);
-        for (const auto& o : nbr) {
-              const int nc = occupiedAt(i + o[0], j + o[1], k + o[2]);
-              if (nc < 0 || owner[static_cast<std::size_t>(nc)] == s) continue;
-              int vi, vj, vk; decode(occVox[static_cast<std::size_t>(nc)], vi, vj, vk);
-              const double d = std::sqrt(dist2(vi, vj, vk, cen[0], cen[1], cen[2]));
-              if (d < distance[static_cast<std::size_t>(nc)]) {
-                distance[static_cast<std::size_t>(nc)] = d;
-                const int prev = owner[static_cast<std::size_t>(nc)];
-                if (prev >= 0) leaves[static_cast<std::size_t>(prev)].erase(nc);
-                owner[static_cast<std::size_t>(nc)] = s;
-                newOwned.push_back(nc);
-              }
-            }
+      const int c0 = seeds[static_cast<std::size_t>(s)];
+      const auto& q0 = pos[static_cast<std::size_t>(c0)];
+      members.assign(1, c0);
+      layer = {c0};
+      mark[static_cast<std::size_t>(c0)] = s;
+      for (int step = 0; step < 2 && !layer.empty(); ++step) {
+        next.clear();
+        for (int c : layer) {
+          const auto& q = pos[static_cast<std::size_t>(c)];
+          for (const auto& o : adj26) {
+            const int u = occupiedAt(q[0] + o[0], q[1] + o[1], q[2] + o[2]);
+            if (u < 0 || mark[static_cast<std::size_t>(u)] == s) continue;
+            mark[static_cast<std::size_t>(u)] = s;
+            next.push_back(u);
+            members.push_back(u);
+          }
+        }
+        layer.swap(next);
       }
-      leaves[static_cast<std::size_t>(s)].insert(newOwned.begin(), newOwned.end());
-    }
-    for (int s = 0; s < nSv; ++s) {
-      if (!alive[static_cast<std::size_t>(s)]) continue;
-      auto& L = leaves[static_cast<std::size_t>(s)];
-      if (L.empty()) { alive[static_cast<std::size_t>(s)] = 0; continue; }
-      // Centroid of the supervoxel's voxels, unwrapped around its current centroid.
-      const auto c0 = centroid[static_cast<std::size_t>(s)];
-      double sx = 0, sy = 0, sz = 0;
-      for (int leaf : L) {
-        int i, j, k; decode(occVox[static_cast<std::size_t>(leaf)], i, j, k);
-        sx += c0[0] + delta(i, c0[0], nx);
-        sy += c0[1] + delta(j, c0[1], ny);
-        sz += c0[2] + delta(k, c0[2], nz);
+      // Summed in voxel order, like every centre update below, so a centre does not depend
+      // on the order the neighbourhood happened to be discovered in.
+      std::sort(members.begin(), members.end());
+      P3 sum{0, 0, 0};
+      for (int c : members) {
+        const auto& q = pos[static_cast<std::size_t>(c)];
+        for (int a = 0; a < 3; ++a) sum[a] += q0[a] + delta(q[a], q0[a], dims[a]);
       }
-      const double n = static_cast<double>(L.size());
-      centroid[static_cast<std::size_t>(s)] = {sx / n, sy / n, sz / n};
+      const double n = static_cast<double>(members.size());
+      centre[static_cast<std::size_t>(s)] = {sum[0] / n, sum[1] / n, sum[2] / n};
     }
   }
 
-  // --- 4. tally; unreached voxels promoted per connected remainder ---------------------
+  // --- §3.4 flow-constrained clustering ---------------------------------------------------
+  std::vector<int> label(static_cast<std::size_t>(nOcc), -1);
+  std::vector<double> best(static_cast<std::size_t>(nOcc));
+  std::vector<std::vector<int>> frontier(static_cast<std::size_t>(nSv));
+  std::vector<std::unordered_set<int>> queued(static_cast<std::size_t>(nSv));
+  std::vector<char> searching(static_cast<std::size_t>(nSv));
+  std::vector<int> next;
+  auto inSearchVolume = [&](int c, const P3& p) {
+    const auto& q = pos[static_cast<std::size_t>(c)];
+    for (int a = 0; a < 3; ++a)
+      if (std::fabs(delta(q[a], p[a], dims[a])) > S) return false;
+    return true;
+  };
+  for (int iter = 0; iter < 5; ++iter) {
+    std::fill(label.begin(), label.end(), -1);
+    std::fill(best.begin(), best.end(), std::numeric_limits<double>::max());
+    for (int s = 0; s < nSv; ++s) {
+      auto& F = frontier[static_cast<std::size_t>(s)];
+      auto& Q = queued[static_cast<std::size_t>(s)];
+      F.clear();
+      Q.clear();
+      searching[static_cast<std::size_t>(s)] = alive[static_cast<std::size_t>(s)];
+      if (!alive[static_cast<std::size_t>(s)]) continue;
+      const int start = nearestTo(centre[static_cast<std::size_t>(s)], nearGuess[static_cast<std::size_t>(s)]);
+      F.push_back(start);
+      Q.insert(start);
+    }
+    for (bool any = true; any;) {  // one level of every supervoxel's search per pass
+      any = false;
+      for (int s = 0; s < nSv; ++s) {
+        if (!searching[static_cast<std::size_t>(s)]) continue;
+        const P3& cen = centre[static_cast<std::size_t>(s)];
+        auto& F = frontier[static_cast<std::size_t>(s)];
+        auto& Q = queued[static_cast<std::size_t>(s)];
+        next.clear();
+        bool setAny = false;
+        for (int v : F) {
+          const double d = std::sqrt(dist2(v, cen));
+          if (!(d < best[static_cast<std::size_t>(v)])) continue;
+          best[static_cast<std::size_t>(v)] = d;
+          label[static_cast<std::size_t>(v)] = s;
+          setAny = true;
+          const auto& q = pos[static_cast<std::size_t>(v)];
+          for (const auto& o : adj26) {
+            const int u = occupiedAt(q[0] + o[0], q[1] + o[1], q[2] + o[2]);
+            if (u < 0 || Q.count(u) || !inSearchVolume(u, cen)) continue;
+            if (!(std::sqrt(dist2(u, cen)) > d)) continue;  // only neighbours further out
+            Q.insert(u);
+            next.push_back(u);
+          }
+        }
+        F.swap(next);
+        if (!setAny || F.empty()) searching[static_cast<std::size_t>(s)] = 0;
+        else any = true;
+      }
+    }
+    // centres <- mean of constituents (minimum image about the old centre)
+    std::vector<P3> sum(static_cast<std::size_t>(nSv), P3{0, 0, 0});
+    std::vector<int> count(static_cast<std::size_t>(nSv), 0);
+    for (int c = 0; c < nOcc; ++c) {
+      const int s = label[static_cast<std::size_t>(c)];
+      if (s < 0) continue;
+      const P3& c0 = centre[static_cast<std::size_t>(s)];
+      const auto& q = pos[static_cast<std::size_t>(c)];
+      for (int a = 0; a < 3; ++a) sum[static_cast<std::size_t>(s)][a] += c0[a] + delta(q[a], c0[a], dims[a]);
+      if (count[static_cast<std::size_t>(s)]++ == 0) nearGuess[static_cast<std::size_t>(s)] = c;
+    }
+    bool moved = false;
+    for (int s = 0; s < nSv; ++s) {
+      if (!alive[static_cast<std::size_t>(s)]) continue;
+      const int n = count[static_cast<std::size_t>(s)];
+      if (n == 0) { alive[static_cast<std::size_t>(s)] = 0; moved = true; continue; }
+      const P3 c{sum[static_cast<std::size_t>(s)][0] / n, sum[static_cast<std::size_t>(s)][1] / n,
+                 sum[static_cast<std::size_t>(s)][2] / n};
+      if (c != centre[static_cast<std::size_t>(s)]) moved = true;
+      centre[static_cast<std::size_t>(s)] = c;
+    }
+    if (!moved) break;
+  }
+
+  // --- tally; voxels no search reached: one cluster per 26-connected remainder -----------
   std::vector<int> assignment(static_cast<std::size_t>(nOcc), -1);
+  std::vector<int> dense(static_cast<std::size_t>(nSv), -1);
   int clusterId = 0;
-  for (int s = 0; s < nSv; ++s) {
-    if (!alive[static_cast<std::size_t>(s)] || leaves[static_cast<std::size_t>(s)].empty()) continue;
-    for (int leaf : leaves[static_cast<std::size_t>(s)]) assignment[static_cast<std::size_t>(leaf)] = clusterId;
-    ++clusterId;
+  for (int c = 0; c < nOcc; ++c) {
+    const int s = label[static_cast<std::size_t>(c)];
+    if (s < 0) continue;
+    if (dense[static_cast<std::size_t>(s)] < 0) dense[static_cast<std::size_t>(s)] = clusterId++;
+    assignment[static_cast<std::size_t>(c)] = dense[static_cast<std::size_t>(s)];
   }
   std::vector<int> stack;
   for (int c = 0; c < nOcc; ++c) {
     if (assignment[static_cast<std::size_t>(c)] != -1) continue;
     assignment[static_cast<std::size_t>(c)] = clusterId;
-    stack.clear();
-    stack.push_back(c);
+    stack.assign(1, c);
     while (!stack.empty()) {
       const int cur = stack.back();
       stack.pop_back();
-      int i0, j0, k0; decode(occVox[static_cast<std::size_t>(cur)], i0, j0, k0);
-      for (const auto& o : nbr) {
-            const int nc = occupiedAt(i0 + o[0], j0 + o[1], k0 + o[2]);
-            if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
-            assignment[static_cast<std::size_t>(nc)] = clusterId;
-            stack.push_back(nc);
-          }
+      const auto& q = pos[static_cast<std::size_t>(cur)];
+      for (const auto& o : adj26) {
+        const int u = occupiedAt(q[0] + o[0], q[1] + o[1], q[2] + o[2]);
+        if (u < 0 || assignment[static_cast<std::size_t>(u)] != -1) continue;
+        assignment[static_cast<std::size_t>(u)] = clusterId;
+        stack.push_back(u);
+      }
     }
     ++clusterId;
   }
@@ -2204,9 +2271,9 @@ ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution, i
 
 ClusterResult vccsOptimized(int nx, int ny, int nz, double seedResolution,
                             const std::vector<uint8_t>& occupancy, std::vector<uint8_t>& visited,
-                            int connectivity, bool periodic) {
-  return periodic ? vccsOptimizedImpl<true>(nx, ny, nz, seedResolution, connectivity, occupancy, visited)
-                  : vccsOptimizedImpl<false>(nx, ny, nz, seedResolution, connectivity, occupancy, visited);
+                            bool periodic) {
+  return periodic ? vccsOptimizedImpl<true>(nx, ny, nz, seedResolution, occupancy, visited)
+                  : vccsOptimizedImpl<false>(nx, ny, nz, seedResolution, occupancy, visited);
 }
 
 }  // namespace bls
