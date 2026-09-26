@@ -233,3 +233,24 @@ if(BLS_USE_XDRFILE AND DEFINED _bls_xdr_rpath)
 endif()
 add_test(NAME bls_guarantees COMMAND test_bls_guarantees)
 set_tests_properties(bls_guarantees PROPERTIES TIMEOUT 1800)
+
+# Created: 2026-09-26T11:17+02:00 | by: CC audit | purpose: pre-release audit test suite.
+# Every tests/audit/test_audit_*.cpp becomes a ctest (label "audit"); every
+# tests/audit/test_audit_*.sh is run by bash with the bls_analyze path as its
+# only argument. Run everything (Debug+ASan/UBSan and Release) with
+#   BLS/tests/audit/run_all.sh
+file(GLOB BLS_AUDIT_CPP_TESTS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/audit/test_audit_*.cpp")
+foreach(_bls_audit_src ${BLS_AUDIT_CPP_TESTS})
+  get_filename_component(_bls_audit_name "${_bls_audit_src}" NAME_WE)
+  add_executable(${_bls_audit_name} "${_bls_audit_src}")
+  target_link_libraries(${_bls_audit_name} PRIVATE bls_core)
+  target_include_directories(${_bls_audit_name} PRIVATE "${CMAKE_SOURCE_DIR}/tests/audit")
+  add_test(NAME ${_bls_audit_name} COMMAND ${_bls_audit_name})
+  set_tests_properties(${_bls_audit_name} PROPERTIES TIMEOUT 7200 LABELS audit)
+endforeach()
+file(GLOB BLS_AUDIT_SH_TESTS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tests/audit/test_audit_*.sh")
+foreach(_bls_audit_sh ${BLS_AUDIT_SH_TESTS})
+  get_filename_component(_bls_audit_name "${_bls_audit_sh}" NAME_WE)
+  add_test(NAME ${_bls_audit_name} COMMAND bash "${_bls_audit_sh}" $<TARGET_FILE:bls_analyze>)
+  set_tests_properties(${_bls_audit_name} PROPERTIES TIMEOUT 7200 LABELS audit)
+endforeach()
