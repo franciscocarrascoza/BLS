@@ -1,4 +1,4 @@
-// Created: 2026-09-26T13:12+02:00 | by: CC audit (manager) | purpose: reduction tests (degenerate parameters must reproduce N6 CCL) + published-form sanity checks
+// Created: 2026-09-26T12:48+02:00 | by: CC audit (manager) | purpose: reduction tests (degenerate parameters must reproduce N6 CCL) + published-form sanity checks
 //
 // Guards claims-ledger IDs:
 //   M-9/C-6  Skip-DFS at s = 1 is N6 DFS (§2.3 l.311-316; §4.2 l.691 "unit stride")        -> partition (count+sizes)

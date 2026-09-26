@@ -1,4 +1,4 @@
-// Created: 2026-09-26T13:05+02:00 | by: CC audit (manager) | purpose: exact-tier partition equality on 10^4 random + structured grids
+// Created: 2026-09-26T12:47+02:00 | by: CC audit (manager) | purpose: exact-tier partition equality on 10^4 random + structured grids
 //
 // Guards claims-ledger IDs:
 //   F3   "any method claiming exactness must reproduce their output component for component" (§1.1 l.117-118)

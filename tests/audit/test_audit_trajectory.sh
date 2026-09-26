@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Created: 2026-09-26T13:40+02:00 | by: CC audit (manager) | purpose: multi-frame (trajectory) and same-grid tests through the real bls_analyze binary, for every reported algorithm
+# Created: 2026-09-26T12:53+02:00 | by: CC audit (manager) | purpose: multi-frame (trajectory) and same-grid tests through the real bls_analyze binary, for every reported algorithm
 #
 # Guards claims-ledger IDs:
 #   TRJ-ID    N identical frames give identical per-frame results, equal to the single-frame run

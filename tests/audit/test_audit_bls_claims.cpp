@@ -1,4 +1,4 @@
-// Created: 2026-09-26T13:25+02:00 | by: CC audit (manager) | purpose: BLS-specific manuscript claims — subset, lattice membership, inverse, discretised covering radius, guarantee over a full offset set, probe count, determinism
+// Created: 2026-09-26T12:52+02:00 | by: CC audit (manager) | purpose: BLS-specific manuscript claims — subset, lattice membership, inverse, discretised covering radius, guarantee over a full offset set, probe count, determinism
 //
 // Guards claims-ledger IDs:
 //   C-1/K-3  every BLS component equals exactly one DFS component (no truncation, split or merge)   §4.2 l.670-678

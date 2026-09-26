@@ -1,4 +1,4 @@
-// Created: 2026-09-26T11:20+02:00 | by: CC audit (manager) | purpose: shared helpers for the pre-release audit test suite (tests/audit/test_audit_*.cpp)
+// Created: 2026-09-26T11:16+02:00 | by: CC audit (manager) | purpose: shared helpers for the pre-release audit test suite (tests/audit/test_audit_*.cpp)
 //
 // Every audit test names the claims-ledger ID it guards (audit/CLAIMS_LEDGER_*.md)
 // through AUDIT_CHECK(claimId, condition, message). A test binary exits non-zero
