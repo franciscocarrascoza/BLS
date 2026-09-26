@@ -90,6 +90,12 @@ void skipDfsUnitStride(std::mt19937_64& rng, int n) {
     p.skipDfsJumpDistance = 1;
     AUDIT_CHECK("M-9/C-6", sameCountAndSizes(audit::runUnlabelled(bls::ClusterAlgorithm::SkipDFS, g, p), ref),
                 desc(g, "skip_dfs s=1 != DFS"));
+    {  // partition level (label output added by the audit, plan item 7)
+      std::vector<int> ls, ld;
+      audit::runLabelled(bls::ClusterAlgorithm::SkipDFS, g, ls, p);
+      audit::runLabelled(bls::ClusterAlgorithm::TraditionalDFS, g, ld);
+      AUDIT_CHECK("M-9/C-6", audit::canonical(ls) == audit::canonical(ld), desc(g, "skip_dfs s=1 partition != DFS partition"));
+    }
     p.skipDfsJumpDistance = 3;
     if (!sameCountAndSizes(audit::runUnlabelled(bls::ClusterAlgorithm::SkipDFS, g, p), ref)) ++differAtS3;
   }
@@ -117,6 +123,11 @@ void hierarchicalReduction(std::mt19937_64& rng, int n) {
       p.threshold = thr;
       AUDIT_CHECK("F6", sameCountAndSizes(audit::runUnlabelled(bls::ClusterAlgorithm::Hierarchical, g, p), dfsOf(g)),
                   desc(g, "hierarchical threshold=" + std::to_string(thr) + " != N6 CCL"));
+      std::vector<int> lh, ld;
+      audit::runLabelled(bls::ClusterAlgorithm::Hierarchical, g, lh, p);
+      audit::runLabelled(bls::ClusterAlgorithm::TraditionalDFS, g, ld);
+      AUDIT_CHECK("F6", audit::canonical(lh) == audit::canonical(ld),
+                  desc(g, "hierarchical threshold=" + std::to_string(thr) + " partition != N6 partition"));
     }
   }
 }

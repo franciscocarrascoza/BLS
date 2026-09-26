@@ -118,11 +118,11 @@ int main(int argc, char** argv) {
   std::printf("dfs        nclusters %7d  max_cluster %7d  visited %8zu\n",
               dfs.nclusters, dfs.maxCluster, dfs.visitedVoxels);
   std::printf("fair       nclusters %7d  max_cluster %7d  visited %8zu  "
-              "candidates %8d  seeds %7d  prune_min %d\n",
+              "candidates %8d  seeds %7d  prune_min %.4g\n",
               fair.nclusters, fair.maxCluster, fair.visitedVoxels,
               fair.seedCandidates, fair.seedsPlaced, fair.seedPruneThreshold);
   std::printf("optimized  nclusters %7d  max_cluster %7d  visited %8zu  "
-              "candidates %8d  seeds %7d  prune_min %d\n",
+              "candidates %8d  seeds %7d  prune_min %.4g\n",
               opt.nclusters, opt.maxCluster, opt.visitedVoxels,
               opt.seedCandidates, opt.seedsPlaced, opt.seedPruneThreshold);
   std::printf("ratios     fair/dfs %.4f  optimized/dfs %.4f  "

@@ -1,12 +1,15 @@
 #include "cluster/Algorithms.hpp"
 
 #include <algorithm>
+#include <set>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -130,11 +133,13 @@ bool supportsLabels(ClusterAlgorithm algo) {
     case ClusterAlgorithm::CC3DOptimized:
     case ClusterAlgorithm::RLECCL:
     case ClusterAlgorithm::RLECCLOptimized:
+    case ClusterAlgorithm::SkipDFS:       // audit plan item 7: partitions, not counts, in tests
+    case ClusterAlgorithm::Hierarchical:
       return true;
     default:
       // BLS is labelled through Analyzer, not here. The remaining methods
-      // (skip_dfs, dbscan, hierarchical, kmeans, hdbscan and both vccs
-      // variants) are not exact partitioners and have no label output yet.
+      // (dbscan, hdbscan -- withdrawn --, kmeans and both vccs variants) have no
+      // label output.
       return false;
   }
 }
@@ -147,10 +152,11 @@ bool supportsPeriodic(ClusterAlgorithm algo) {
     case ClusterAlgorithm::GCBD:
     case ClusterAlgorithm::CC3DOptimized:
     case ClusterAlgorithm::RLECCLOptimized:
+    case ClusterAlgorithm::VCCSOptimized:
       return true;
     default:
       // Withdrawn textbook tracks (cc3d, rle_ccl, vccs), withdrawn DBSCAN/HDBSCAN (D4/D5),
-      // k-means (declared non-periodic, D11), hierarchical (SI only), vccs_optimized (WP4).
+      // k-means (declared non-periodic, D11), hierarchical (SI only).
       return false;
   }
 }
@@ -182,11 +188,12 @@ ClusterResult runClusterAlgorithm(
                             params.periodic);
     case ClusterAlgorithm::SkipDFS:
       return skipDFS(params.nx, params.ny, params.nz, params.skipDfsJumpDistance, occupancy,
-                     visited, params.periodic);
+                     visited, labels, params.periodic);
     case ClusterAlgorithm::DBSCAN:
       return dbscan(params.nx, params.ny, params.nz, params.eps, params.minPts, occupancy, visited);
     case ClusterAlgorithm::Hierarchical:
-      return hierarchical(params.nx, params.ny, params.nz, params.threshold, occupancy, visited);
+      return hierarchical(params.nx, params.ny, params.nz, params.threshold, occupancy, visited,
+                          labels);
     case ClusterAlgorithm::KMeans:
       return kmeans(params.nx, params.ny, params.nz, params.k, occupancy, visited);
     case ClusterAlgorithm::GCBD:
@@ -207,7 +214,8 @@ ClusterResult runClusterAlgorithm(
       // Use params.eps as seed spacing in voxels (default 3.0)
       return vccs(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
     case ClusterAlgorithm::VCCSOptimized:
-      return vccsOptimized(params.nx, params.ny, params.nz, params.eps, occupancy, visited);
+      return vccsOptimized(params.nx, params.ny, params.nz, params.eps, occupancy, visited,
+                           params.connectivity, params.periodic);
   }
   throw std::runtime_error("Unhandled algorithm type");
 }
@@ -311,13 +319,15 @@ template <bool Periodic>
 ClusterResult skipDFSImpl(
     int nx, int ny, int nz, int skip,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, totalSize);
 
   std::vector<StackElement> stack;
   stack.reserve(10000);
@@ -362,6 +372,7 @@ ClusterResult skipDFSImpl(
         if (occupancy[index] == 0 || visited[index]) continue;
 
         visited[index] = 1;
+        if (labels) (*labels)[index] = result.nclusters;  // dense: ordinal of this component
         clusterSize++;
         result.visitedVoxels++;
 
@@ -417,6 +428,7 @@ ClusterResult skipDFSImpl(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -425,11 +437,11 @@ ClusterResult skipDFSImpl(
 }  // namespace
 
 ClusterResult skipDFS(int nx, int ny, int nz, int skip, const std::vector<uint8_t>& occupancy,
-                      std::vector<uint8_t>& visited, bool periodic) {
+                      std::vector<uint8_t>& visited, std::vector<int>* labels, bool periodic) {
   // PBC xyz runs a separate instantiation: PBC none executes the pre-audit code
   // unchanged (same instructions, same cost); only the periodic run pays for wrapping.
-  return periodic ? skipDFSImpl<true>(nx, ny, nz, skip, occupancy, visited)
-                  : skipDFSImpl<false>(nx, ny, nz, skip, occupancy, visited);
+  return periodic ? skipDFSImpl<true>(nx, ny, nz, skip, occupancy, visited, labels)
+                  : skipDFSImpl<false>(nx, ny, nz, skip, occupancy, visited, labels);
 }
 
 // DBSCAN with grid-based spatial indexing
@@ -587,12 +599,14 @@ ClusterResult hierarchical(
     int nx, int ny, int nz,
     double threshold,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
+    std::vector<uint8_t>& visited,
+    std::vector<int>* labels) {
 
   ScopedTimer timer;
   ClusterResult result;
 
   std::fill(visited.begin(), visited.end(), 0);
+  initLabels(labels, static_cast<std::size_t>(nx) * ny * nz);
 
   // Collect occupied points
   std::vector<Point> points;
@@ -663,6 +677,7 @@ ClusterResult hierarchical(
     clusterSizeMap[root]++;
 
     std::size_t occIdx = idx3(points[i].i, points[i].j, points[i].k, ny, nz);
+    if (labels) (*labels)[occIdx] = root;
     visited[occIdx] = 1;
     result.visitedVoxels++;
   }
@@ -675,6 +690,7 @@ ClusterResult hierarchical(
     }
   }
 
+  compactLabels(labels);
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
@@ -711,6 +727,10 @@ ClusterResult kmeans(
     return result;
   }
 
+  if (k < 1) {
+    // KMEANS-1: k <= 0 used to size the centroid arrays to zero and then write into them.
+    throw std::invalid_argument("kmeans: k must be >= 1 (got " + std::to_string(k) + ")");
+  }
   k = std::min(k, numPoints);
 
   // Initialize centroids (evenly spaced)
@@ -724,8 +744,12 @@ ClusterResult kmeans(
 
   std::vector<int> assignments(numPoints);
 
-  // Run k-means for 10 iterations
+  // Lloyd iterations, at most 10 (the campaign's cap, disclosed). Stops early at a fixed
+  // point: when no assignment changes, the centroids the next update would compute are
+  // the ones already in place, so every later iteration repeats this one -- the result is
+  // identical to running all 10, only the redundant work is skipped (KMEANS-2 hygiene, D11).
   for (int iter = 0; iter < 10; ++iter) {
+    bool changed = (iter == 0);
     // Assign points to nearest centroid
     for (int p = 0; p < numPoints; ++p) {
       double minDist = std::numeric_limits<double>::max();
@@ -740,8 +764,10 @@ ClusterResult kmeans(
           bestK = kk;
         }
       }
+      if (assignments[p] != bestK) changed = true;
       assignments[p] = bestK;
     }
+    if (!changed) break;
 
     // Update centroids
     std::vector<double> sumX(k, 0), sumY(k, 0), sumZ(k, 0);
@@ -1888,57 +1914,56 @@ ClusterResult vccs(
 }
 
 
+namespace {
+
 // ── VCCS, optimized track ────────────────────────────────────────────────────
 //
-// The supervoxel core of pcl::SupervoxelClustering (Papon, Abramov, Schoeler &
-// Woergoetter, "Voxel Cloud Connectivity Segmentation - Supervoxels for Point
-// Clouds", CVPR 2013), PORTED rather than linked. BSD-3-Clause, so unlike the
-// cc3d question there is no licence obstacle to either route; the port was
-// chosen because PCL 1.14 pulls in Boost, Eigen, FLANN and VTK for one
-// comparison algorithm, this build currently has no mandatory external
-// dependency at all, and PCL's entry point takes a PointCloud<PointXYZRGBA>
-// with estimated normals -- the adapter from a binary voxel grid would be more
-// code than the algorithm.
+// PORTED rather than linked: PCL 1.14 pulls in Boost, Eigen, FLANN and VTK for one
+// comparison algorithm, this build has no mandatory external dependency, and PCL's entry
+// point takes a PointCloud<PointXYZRGBA> with estimated normals -- the adapter from a
+// binary voxel grid would be more code than the algorithm. No grid-sized array is
+// allocated: the occupied voxels are collected once into a raster-ordered list and every
+// per-voxel state is indexed by position in it (voxel index -> position is a binary search).
+// PCL's octree adjacency graph is not ported either: on a regular grid a voxel's
+// neighbours are index arithmetic away.
 //
-// What the published method adds over the fair track, and what is implemented
-// here:
+// VCCS in its published form (audit decision D6; findings VCCS-1, -2, -5, -6):
+// a port of PCL's SupervoxelClustering (Papon et al., CVPR 2013; PCL
+// segmentation/impl/supervoxel_clustering.hpp, BSD-3-Clause, see THIRD_PARTY_NOTICES.md)
+// onto the occupancy grid, with the voxel resolution = 1 voxel and the spatial
+// distance term only (every voxel here is identical apart from its position, so
+// PCL's colour and normal terms carry no information; manuscript l.446-450).
 //
-//   1. ADAPTIVE SEEDING. The fair track takes the voxel at the centre of each
-//      seed cell and drops the seed entirely if that one voxel happens to be
-//      empty (Algorithms.cpp, vccs, "if (occupancy[seedIdx] == 1 ...)"). Here
-//      each seed cell is searched and the seed is placed on the occupied voxel
-//      NEAREST the cell centre, so a cell containing structure always seeds.
+//   seeding   one candidate per occupied seed cell (edge S voxels): the occupied voxel
+//             nearest the cell centre, over ALL occupied voxels (PCL: kd-tree nearest to
+//             the seed-octree leaf centre); candidates chosen twice are kept once.
+//   pruning   keep a candidate iff  #{occupied v : |v - c|^2 < R^2} > 0.05*pi*R^2,
+//             R = S/2 (PCL selectInitialSupervoxelSeeds; strict < as FLANN's radius search).
+//   growth    max_depth = int(1.8*S); for i = 1 .. max_depth-1: every supervoxel, in seed
+//             order, scans the neighbours (PCL: 26; here the method's connectivity, see
+//             below) of all its voxels and takes a neighbour whose
+//             distance to the supervoxel's CENTROID is below the neighbour's recorded
+//             distance (taking it from its previous owner); then empty supervoxels are
+//             dropped and centroids recomputed (PCL expandSupervoxels / SupervoxelHelper::
+//             expand / updateCentroid). As in PCL, a seed voxel's recorded distance starts
+//             at +inf, so a neighbouring supervoxel may take it.
+//   output    one cluster per non-empty supervoxel. Voxels no supervoxel reached (PCL leaves
+//             them unlabelled) are promoted, one cluster per connected remainder, so that
+//             every method is tallied on the same terms (a coverage gap shows up as extra
+//             clusters, not as missing voxels).
 //
-//   2. SEED PRUNING. Papon et al. reject seeds in sparse neighbourhoods, since
-//      a seed on an isolated speck produces a supervoxel that is noise rather
-//      than structure. A candidate is kept only if the occupied count within
-//      Rsearch = S/2 reaches a fraction of what a filled ball would hold.
-//
-//   3. NO GRID-SIZED ALLOCATION. The fair track allocates `assignment` at grid
-//      volume (95 MB at E1 size). Here the occupied voxels are collected once
-//      into a raster-ordered list and everything -- assignment, seeds, the
-//      priority queue -- is indexed by position in that list. Voxel index to
-//      list position is a binary search over ~21k entries, ~15 comparisons,
-//      against ~126k neighbour lookups on E1; that trade buys the removal of
-//      every grid-sized array.
-//
-// DELIBERATELY NOT PORTED: the colour and normal terms of PCL's feature
-// distance D = sqrt(lambda*Dc^2/m^2 + mu*Ds^2/(3R^2) + epsilon*Dn^2). On a
-// binary voxel grid there is no colour, and a surface normal is not defined for
-// an occupancy indicator -- every voxel is identical apart from its position.
-// Only the spatial term Ds carries information, so the distance here is bare
-// Euclidean, as it already is in the fair track. Including a colour term over
-// constant colour, or a normal term over normals estimated from the occupancy
-// itself, would add cost and arbitrary weights without adding information.
-// Also not ported: PCL's octree adjacency graph, which exists to give
-// neighbour queries on an unstructured cloud and is redundant on a regular
-// grid where the six neighbours are an index arithmetic away.
-ClusterResult vccsOptimized(
-    int nx, int ny, int nz,
-    double seedResolution,
-    const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited) {
-
+// Deliberate differences from PCL, all forced by determinism or the voxel grid: voxels of a
+// supervoxel are visited in voxel-index order (PCL: a pointer-ordered std::set, i.e. memory
+// layout); seed cells are aligned with the grid, [cS, cS+S-1] (PCL: the seed octree's
+// bounding box, itself an arbitrary alignment); distances are in voxels, not scaled by spatial_importance/S
+// (a common positive factor, so every comparison is unchanged).
+// Under PBC xyz (Periodic) adjacency wraps, and every distance and centroid is taken with
+// the minimum image; the seed-cell grid is not periodic (PCL has no PBC; a cell cut by a face
+// is simply a smaller cell).
+template <bool Periodic>
+ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution, int connectivity,
+                                const std::vector<uint8_t>& occupancy,
+                                std::vector<uint8_t>& visited) {
   ScopedTimer timer;
   ClusterResult result;
 
@@ -1946,6 +1971,17 @@ ClusterResult vccsOptimized(
   std::fill(visited.begin(), visited.end(), 0);
 
   const int S = std::max(1, static_cast<int>(std::round(seedResolution)));
+  // Growth / remainder adjacency: PCL's is 26 (face, edge, vertex). Here it is the
+  // method's connectivity (6, 18 or 26) so the caller decides whether VCCS refines the
+  // same components the exact methods label (6) or PCL's (26); see decision D6.
+  std::vector<std::array<int, 3>> nbr;
+  for (int di = -1; di <= 1; ++di)
+    for (int dj = -1; dj <= 1; ++dj)
+      for (int dk = -1; dk <= 1; ++dk) {
+        const int m = std::abs(di) + std::abs(dj) + std::abs(dk);
+        if (m == 0 || (connectivity == 6 && m != 1) || (connectivity == 18 && m == 3)) continue;
+        nbr.push_back({di, dj, dk});
+      }
 
   // The one pass over the occupancy array. Raster order, so `occVox` comes out
   // sorted and can be binary-searched without an explicit sort.
@@ -1971,116 +2007,160 @@ ClusterResult vccsOptimized(
     j = rem / nz;
     k = rem % nz;
   };
+  // Neighbour / offset voxel -> compact index, -1 when outside (non-periodic) or empty.
+  auto occupiedAt = [&](int i, int j, int k) -> int {
+    if constexpr (Periodic) {
+      i = ((i % nx) + nx) % nx;
+      j = ((j % ny) + ny) % ny;
+      k = ((k % nz) + nz) % nz;
+    } else {
+      if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return -1;
+    }
+    const int v = static_cast<int>(idx3(i, j, k, ny, nz));
+    return occupancy[static_cast<std::size_t>(v)] == 1 ? compactOf(v) : -1;
+  };
+  // Displacement a - b along one axis of length n (minimum image under PBC).
+  auto delta = [](double a, double b, int n) {
+    double d = a - b;
+    if constexpr (Periodic) d -= n * std::round(d / n);
+    return d;
+  };
+  auto dist2 = [&](double ai, double aj, double ak, double bi, double bj, double bk) {
+    const double di = delta(ai, bi, nx), dj = delta(aj, bj, ny), dk = delta(ak, bk, nz);
+    return di * di + dj * dj + dk * dk;
+  };
 
-  std::vector<int> assignment(static_cast<std::size_t>(nOcc), -1);
-
-  // --- 1. adaptive seeding -------------------------------------------------
-  // Bucket occupied voxels by seed cell, then keep the one nearest the cell
-  // centre. Iterating occupied voxels rather than cells keeps this O(nOcc).
-  struct Cand { int best = -1; double bestD2 = 0.0; };
-  std::unordered_map<long long, Cand> cells;
-  cells.reserve(static_cast<std::size_t>(nOcc));
-  const int halfS = S / 2;
+  // --- 1. seeding: nearest occupied voxel to each occupied seed-cell centre ------------
+  // Seed cells are the S^3 blocks [cS, cS+S-1] per axis, centre cS + (S-1)/2 in voxel-
+  // centre coordinates. The best voxel inside the cell bounds the search: only voxels
+  // strictly closer to the centre (or as close, with a smaller index) can replace it,
+  // and they lie in the cube of that radius around the centre.
+  std::vector<std::pair<std::array<int, 3>, int>> byCell;
+  byCell.reserve(static_cast<std::size_t>(nOcc));
   for (int c = 0; c < nOcc; ++c) {
     int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
-    const int ci = (i - halfS >= 0) ? (i - halfS) / S : -1 - ((halfS - i - 1) / S);
-    const int cj = (j - halfS >= 0) ? (j - halfS) / S : -1 - ((halfS - j - 1) / S);
-    const int ck = (k - halfS >= 0) ? (k - halfS) / S : -1 - ((halfS - k - 1) / S);
-    const double cx = halfS + static_cast<double>(ci) * S;
-    const double cy = halfS + static_cast<double>(cj) * S;
-    const double cz = halfS + static_cast<double>(ck) * S;
-    const double d2 = (i - cx) * (i - cx) + (j - cy) * (j - cy) + (k - cz) * (k - cz);
-    const long long key = ((static_cast<long long>(ci) * 73856093LL) ^
-                           (static_cast<long long>(cj) * 19349663LL) ^
-                           (static_cast<long long>(ck) * 83492791LL));
-    auto it = cells.find(key);
-    if (it == cells.end()) cells.emplace(key, Cand{c, d2});
-    else if (d2 < it->second.bestD2) { it->second.best = c; it->second.bestD2 = d2; }
+    byCell.push_back({{i / S, j / S, k / S}, c});
   }
-
-  // --- 2. seed pruning -----------------------------------------------------
-  // Reject a candidate whose neighbourhood within Rsearch = S/2 is too sparse
-  // to represent structure. The 0.05 fraction of a filled ball is PCL's.
-  const double rSearch = 0.5 * S;
-  const double ballVolume = (4.0 / 3.0) * 3.14159265358979323846 * rSearch * rSearch * rSearch;
-  const int minPoints = std::max(1, static_cast<int>(0.05 * ballVolume));
-  const int r = static_cast<int>(std::floor(rSearch));
-
-  std::vector<int> seeds;
-  seeds.reserve(cells.size());
-  for (const auto& kv : cells) {
-    const int c = kv.second.best;
-    if (c < 0) continue;
-    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
-    int neighbours = 0;
-    for (int di = -r; di <= r; ++di)
-      for (int dj = -r; dj <= r; ++dj)
-        for (int dk = -r; dk <= r; ++dk) {
-          if (di * di + dj * dj + dk * dk > r * r) continue;
-          const int ni = i + di, nj = j + dj, nk = k + dk;
-          if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
-          if (occupancy[idx3(ni, nj, nk, ny, nz)] == 1) ++neighbours;
+  std::sort(byCell.begin(), byCell.end());
+  std::vector<int> candidates;
+  const double half = 0.5 * (S - 1);
+  for (std::size_t g = 0; g < byCell.size();) {
+    const auto cell = byCell[g].first;
+    const double cx = cell[0] * S + half, cy = cell[1] * S + half, cz = cell[2] * S + half;
+    int best = -1;
+    double bestD2 = 0.0;
+    for (; g < byCell.size() && byCell[g].first == cell; ++g) {
+      const int c = byCell[g].second;
+      int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
+      const double d2 = dist2(i, j, k, cx, cy, cz);
+      if (best < 0 || d2 < bestD2 || (d2 == bestD2 && c < best)) { best = c; bestD2 = d2; }
+    }
+    const int reach = static_cast<int>(std::ceil(std::sqrt(bestD2))) + 1;
+    const int ci = static_cast<int>(std::floor(cx)), cj = static_cast<int>(std::floor(cy)),
+              ck = static_cast<int>(std::floor(cz));
+    for (int i = ci - reach; i <= ci + reach + 1; ++i)
+      for (int j = cj - reach; j <= cj + reach + 1; ++j)
+        for (int k = ck - reach; k <= ck + reach + 1; ++k) {
+          const int c = occupiedAt(i, j, k);
+          if (c < 0 || c == best) continue;
+          int vi, vj, vk; decode(occVox[static_cast<std::size_t>(c)], vi, vj, vk);
+          const double d2 = dist2(vi, vj, vk, cx, cy, cz);
+          if (d2 < bestD2 || (d2 == bestD2 && c < best)) { best = c; bestD2 = d2; }
         }
-    if (neighbours >= minPoints) seeds.push_back(c);
+    candidates.push_back(best);
   }
-  result.seedCandidates = static_cast<int>(cells.size());
+  // Two cells can pick the same voxel; PCL would then give one voxel to two helpers
+  // (the second addLeaf wins the owner). One supervoxel per voxel is kept.
+  std::sort(candidates.begin(), candidates.end());
+  candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+  // --- 2. pruning (PCL selectInitialSupervoxelSeeds) ----------------------------------
+  const double rSearch = 0.5 * S;
+  const double minPoints = 0.05 * rSearch * rSearch * 3.1415926536;
+  const int reachR = static_cast<int>(std::ceil(rSearch));
+  std::vector<int> seeds;
+  seeds.reserve(candidates.size());
+  for (int c : candidates) {
+    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
+    int num = 0;
+    for (int di = -reachR; di <= reachR; ++di)
+      for (int dj = -reachR; dj <= reachR; ++dj)
+        for (int dk = -reachR; dk <= reachR; ++dk) {
+          if (di * di + dj * dj + dk * dk >= rSearch * rSearch) continue;  // strict, as FLANN
+          if (occupiedAt(i + di, j + dj, k + dk) >= 0) ++num;
+        }
+    if (num > minPoints) seeds.push_back(c);
+  }
+  result.seedCandidates = static_cast<int>(candidates.size());
   result.seedsPlaced = static_cast<int>(seeds.size());
   result.seedPruneThreshold = minPoints;
-  // Seeds are keyed through an unordered_map, whose iteration order is not
-  // specified; sorting restores a deterministic cluster numbering.
-  std::sort(seeds.begin(), seeds.end());
 
-  // --- 3. flow-constrained expansion ---------------------------------------
-  struct PQEntry {
-    double dist; int compact; int clusterId; int si, sj, sk;
-    bool operator>(const PQEntry& o) const {
-      if (dist != o.dist) return dist > o.dist;
-      return compact > o.compact;   // deterministic tie-break
+  // --- 3. growth (PCL expandSupervoxels) -----------------------------------------------
+  const int nSv = static_cast<int>(seeds.size());
+  std::vector<int> owner(static_cast<std::size_t>(nOcc), -1);
+  std::vector<double> distance(static_cast<std::size_t>(nOcc), std::numeric_limits<double>::max());
+  std::vector<std::set<int>> leaves(static_cast<std::size_t>(nSv));
+  std::vector<std::array<double, 3>> centroid(static_cast<std::size_t>(nSv));
+  std::vector<char> alive(static_cast<std::size_t>(nSv), 1);
+  for (int s = 0; s < nSv; ++s) {
+    const int c = seeds[static_cast<std::size_t>(s)];
+    leaves[static_cast<std::size_t>(s)].insert(c);  // addLeaf: owner set, distance left at +inf
+    owner[static_cast<std::size_t>(c)] = s;
+    int i, j, k; decode(occVox[static_cast<std::size_t>(c)], i, j, k);
+    centroid[static_cast<std::size_t>(s)] = {double(i), double(j), double(k)};
+  }
+
+  const int maxDepth = static_cast<int>(1.8 * S);
+  std::vector<int> newOwned;
+  for (int round = 1; round < maxDepth; ++round) {
+    for (int s = 0; s < nSv; ++s) {
+      if (!alive[static_cast<std::size_t>(s)]) continue;
+      newOwned.clear();
+      const auto& cen = centroid[static_cast<std::size_t>(s)];
+      for (int leaf : leaves[static_cast<std::size_t>(s)]) {
+        int i, j, k; decode(occVox[static_cast<std::size_t>(leaf)], i, j, k);
+        for (const auto& o : nbr) {
+              const int nc = occupiedAt(i + o[0], j + o[1], k + o[2]);
+              if (nc < 0 || owner[static_cast<std::size_t>(nc)] == s) continue;
+              int vi, vj, vk; decode(occVox[static_cast<std::size_t>(nc)], vi, vj, vk);
+              const double d = std::sqrt(dist2(vi, vj, vk, cen[0], cen[1], cen[2]));
+              if (d < distance[static_cast<std::size_t>(nc)]) {
+                distance[static_cast<std::size_t>(nc)] = d;
+                const int prev = owner[static_cast<std::size_t>(nc)];
+                if (prev >= 0) leaves[static_cast<std::size_t>(prev)].erase(nc);
+                owner[static_cast<std::size_t>(nc)] = s;
+                newOwned.push_back(nc);
+              }
+            }
+      }
+      leaves[static_cast<std::size_t>(s)].insert(newOwned.begin(), newOwned.end());
     }
-  };
-  std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<PQEntry>> pq;
+    for (int s = 0; s < nSv; ++s) {
+      if (!alive[static_cast<std::size_t>(s)]) continue;
+      auto& L = leaves[static_cast<std::size_t>(s)];
+      if (L.empty()) { alive[static_cast<std::size_t>(s)] = 0; continue; }
+      // Centroid of the supervoxel's voxels, unwrapped around its current centroid.
+      const auto c0 = centroid[static_cast<std::size_t>(s)];
+      double sx = 0, sy = 0, sz = 0;
+      for (int leaf : L) {
+        int i, j, k; decode(occVox[static_cast<std::size_t>(leaf)], i, j, k);
+        sx += c0[0] + delta(i, c0[0], nx);
+        sy += c0[1] + delta(j, c0[1], ny);
+        sz += c0[2] + delta(k, c0[2], nz);
+      }
+      const double n = static_cast<double>(L.size());
+      centroid[static_cast<std::size_t>(s)] = {sx / n, sy / n, sz / n};
+    }
+  }
 
+  // --- 4. tally; unreached voxels promoted per connected remainder ---------------------
+  std::vector<int> assignment(static_cast<std::size_t>(nOcc), -1);
   int clusterId = 0;
-  for (int c : seeds) {
-    if (assignment[static_cast<std::size_t>(c)] != -1) continue;
-    assignment[static_cast<std::size_t>(c)] = clusterId;
-    int si, sj, sk; decode(occVox[static_cast<std::size_t>(c)], si, sj, sk);
-    for (int d = 0; d < 6; ++d) {
-      const int ni = si + deltas6[d][0], nj = sj + deltas6[d][1], nk = sk + deltas6[d][2];
-      if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
-      const int nv = static_cast<int>(idx3(ni, nj, nk, ny, nz));
-      if (occupancy[static_cast<std::size_t>(nv)] != 1) continue;
-      const int nc = compactOf(nv);
-      if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
-      pq.push({1.0, nc, clusterId, si, sj, sk});
-    }
+  for (int s = 0; s < nSv; ++s) {
+    if (!alive[static_cast<std::size_t>(s)] || leaves[static_cast<std::size_t>(s)].empty()) continue;
+    for (int leaf : leaves[static_cast<std::size_t>(s)]) assignment[static_cast<std::size_t>(leaf)] = clusterId;
     ++clusterId;
   }
-
-  while (!pq.empty()) {
-    const PQEntry e = pq.top();
-    pq.pop();
-    if (assignment[static_cast<std::size_t>(e.compact)] != -1) continue;
-    assignment[static_cast<std::size_t>(e.compact)] = e.clusterId;
-    int i0, j0, k0; decode(occVox[static_cast<std::size_t>(e.compact)], i0, j0, k0);
-    for (int d = 0; d < 6; ++d) {
-      const int ni = i0 + deltas6[d][0], nj = j0 + deltas6[d][1], nk = k0 + deltas6[d][2];
-      if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
-      const int nv = static_cast<int>(idx3(ni, nj, nk, ny, nz));
-      if (occupancy[static_cast<std::size_t>(nv)] != 1) continue;
-      const int nc = compactOf(nv);
-      if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
-      const double dd = std::sqrt(static_cast<double>((ni - e.si) * (ni - e.si) +
-                                                      (nj - e.sj) * (nj - e.sj) +
-                                                      (nk - e.sk) * (nk - e.sk)));
-      pq.push({dd, nc, e.clusterId, e.si, e.sj, e.sk});
-    }
-  }
-
-  // Occupied voxels no surviving seed reached. PCL leaves these unlabelled; the
-  // fair track promotes each connected remainder to its own cluster, and that
-  // is kept here so the two tracks are tallied on the same terms -- a coverage
-  // gap shows up as extra clusters in both, not as missing voxels in one.
   std::vector<int> stack;
   for (int c = 0; c < nOcc; ++c) {
     if (assignment[static_cast<std::size_t>(c)] != -1) continue;
@@ -2091,25 +2171,19 @@ ClusterResult vccsOptimized(
       const int cur = stack.back();
       stack.pop_back();
       int i0, j0, k0; decode(occVox[static_cast<std::size_t>(cur)], i0, j0, k0);
-      for (int d = 0; d < 6; ++d) {
-        const int ni = i0 + deltas6[d][0], nj = j0 + deltas6[d][1], nk = k0 + deltas6[d][2];
-        if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
-        const int nv = static_cast<int>(idx3(ni, nj, nk, ny, nz));
-        if (occupancy[static_cast<std::size_t>(nv)] != 1) continue;
-        const int nc = compactOf(nv);
-        if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
-        assignment[static_cast<std::size_t>(nc)] = clusterId;
-        stack.push_back(nc);
-      }
+      for (const auto& o : nbr) {
+            const int nc = occupiedAt(i0 + o[0], j0 + o[1], k0 + o[2]);
+            if (nc < 0 || assignment[static_cast<std::size_t>(nc)] != -1) continue;
+            assignment[static_cast<std::size_t>(nc)] = clusterId;
+            stack.push_back(nc);
+          }
     }
     ++clusterId;
   }
 
   std::vector<int> sizes(static_cast<std::size_t>(clusterId), 0);
   for (int c = 0; c < nOcc; ++c) {
-    const int a = assignment[static_cast<std::size_t>(c)];
-    if (a < 0) continue;
-    ++sizes[static_cast<std::size_t>(a)];
+    ++sizes[static_cast<std::size_t>(assignment[static_cast<std::size_t>(c)])];
     visited[static_cast<std::size_t>(occVox[static_cast<std::size_t>(c)])] = 1;
     result.visitedVoxels++;
   }
@@ -2124,6 +2198,15 @@ ClusterResult vccsOptimized(
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult vccsOptimized(int nx, int ny, int nz, double seedResolution,
+                            const std::vector<uint8_t>& occupancy, std::vector<uint8_t>& visited,
+                            int connectivity, bool periodic) {
+  return periodic ? vccsOptimizedImpl<true>(nx, ny, nz, seedResolution, connectivity, occupancy, visited)
+                  : vccsOptimizedImpl<false>(nx, ny, nz, seedResolution, connectivity, occupancy, visited);
 }
 
 }  // namespace bls

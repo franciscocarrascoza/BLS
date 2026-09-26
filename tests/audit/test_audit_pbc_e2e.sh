@@ -12,8 +12,8 @@
 #   E2E-EXACT  the exact comparison methods with periodic adjacency (WP3: traditional_dfs, skip_dfs at unit
 #              stride, gcbd, cc3d_optimized, rle_ccl_optimized) agree with BLS under PBC xyz and PBC none
 #   E2E-REFUSE methods without periodic adjacency refuse PBC xyz (non-zero exit, message): withdrawn cc3d,
-#              rle_ccl, vccs, dbscan, hdbscan; k-means, hierarchical, vccs_optimized; a hexagonal probe
-#              lattice under PBC xyz is refused (D10)
+#              rle_ccl, vccs, dbscan, hdbscan; k-means, hierarchical; a hexagonal probe lattice under
+#              PBC xyz is refused (D10); vccs_optimized (WP4) runs under PBC and covers the occupied set
 #
 # Usage: test_audit_pbc_e2e.sh /path/to/bls_analyze
 set -uo pipefail
@@ -114,12 +114,16 @@ for a in traditional_dfs skip_dfs gcbd cc3d_optimized rle_ccl_optimized; do
 done
 
 # Refusals: methods without periodic adjacency, hexagonal probe lattice under PBC (D10).
-for a in cc3d rle_ccl vccs vccs_optimized dbscan hdbscan kmeans hierarchical; do
+for a in cc3d rle_ccl vccs dbscan hdbscan kmeans hierarchical; do
   extra=(); [[ $a == kmeans ]] && extra=(--algo-k 2)
   run_algo pbc.in "refuse_$a.csv" "$a" "${extra[@]}"; rc=$?
   check E2E-REFUSE "$([[ $rc != 0 ]] && grep -q "PBC is not implemented" "$WORK/stderr_refuse_$a.csv.log" && echo 1)" \
         "$a ran under PBC xyz (rc=$rc)"
 done
+# vccs_optimized (WP4) runs under PBC and, as a segmentation, covers every occupied voxel.
+run_algo pbc.in vccs.csv vccs_optimized --algo-connectivity 26; rc=$?
+check E2E-REFUSE "$([[ $rc == 0 && $(col vccs.csv 24) == xyz && $(col vccs.csv 14) == $(col pbc.csv 14) ]] && echo 1)" \
+      "vccs_optimized under PBC xyz: rc=$rc pbc='$(col vccs.csv 24)' covered $(col vccs.csv 14) of $(col pbc.csv 14) $(cat "$WORK/stderr_vccs.csv.log")"
 run pbc_hex.in hex.csv bls; rc=$?
 check E2E-REFUSE "$([[ $rc != 0 ]] && grep -qi "cubic" "$WORK/stderr_hex.csv.log" && echo 1)" \
       "hexagonal probe lattice ran under PBC xyz (rc=$rc): $(cat "$WORK/stderr_hex.csv.log")"

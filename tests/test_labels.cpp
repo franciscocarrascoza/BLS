@@ -83,13 +83,16 @@ std::vector<Case> buildCases() {
   return cases;
 }
 
+// Skip-DFS and hierarchical gained label output in the 2026-09-26 audit; they are run
+// here at the settings where they ARE connected-component labellers (unit stride,
+// single linkage at threshold 1.0 voxel), so every check below applies to them.
 const ClusterAlgorithm kLabelled[] = {
     ClusterAlgorithm::TraditionalDFS, ClusterAlgorithm::CC3D,    ClusterAlgorithm::CC3DOptimized,
-    ClusterAlgorithm::GCBD,           ClusterAlgorithm::RLECCL, ClusterAlgorithm::RLECCLOptimized};
+    ClusterAlgorithm::GCBD,           ClusterAlgorithm::RLECCL, ClusterAlgorithm::RLECCLOptimized,
+    ClusterAlgorithm::SkipDFS,        ClusterAlgorithm::Hierarchical};
 
 const ClusterAlgorithm kUnlabelled[] = {
-    ClusterAlgorithm::SkipDFS, ClusterAlgorithm::DBSCAN,  ClusterAlgorithm::Hierarchical,
-    ClusterAlgorithm::KMeans,  ClusterAlgorithm::HDBSCAN,
+    ClusterAlgorithm::DBSCAN,  ClusterAlgorithm::KMeans,  ClusterAlgorithm::HDBSCAN,
     ClusterAlgorithm::VCCS,    ClusterAlgorithm::VCCSOptimized};
 
 }  // namespace
@@ -101,6 +104,8 @@ int main() {
     ClusterParams params;
     params.nx = c.nx; params.ny = c.ny; params.nz = c.nz;
     params.connectivity = 6;
+    params.skipDfsJumpDistance = 1;
+    params.threshold = 1.0;
 
     for (ClusterAlgorithm algo : kLabelled) {
       const std::string tag = c.name + "/" + bls::algorithmToString(algo);

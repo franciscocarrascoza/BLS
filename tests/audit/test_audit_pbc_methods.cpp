@@ -10,7 +10,7 @@
 //   PBC-NONE   periodic = false still gives the non-periodic partition (the PBC none instantiation)
 //   PBC-REFUSE every method without periodic adjacency throws under PBC instead of returning a
 //              non-periodic answer: withdrawn cc3d/rle_ccl/vccs, dbscan/hdbscan (D4/D5), k-means (D11),
-//              hierarchical, vccs_optimized (until WP4)
+//              hierarchical (vccs_optimized is periodic since WP4: test_audit_vccs_pcl)
 
 #include <algorithm>
 #include <cstdio>
@@ -105,10 +105,10 @@ void periodicPartitions() {
 void refusals() {
   std::mt19937_64 rng(7);
   const auto g = audit::randomGrid(rng, 8, 8, 8, 0.3);
-  const ClusterAlgorithm refused[] = {ClusterAlgorithm::CC3D,     ClusterAlgorithm::RLECCL,
-                                      ClusterAlgorithm::VCCS,     ClusterAlgorithm::VCCSOptimized,
-                                      ClusterAlgorithm::DBSCAN,   ClusterAlgorithm::HDBSCAN,
-                                      ClusterAlgorithm::KMeans,   ClusterAlgorithm::Hierarchical};
+  const ClusterAlgorithm refused[] = {ClusterAlgorithm::CC3D,   ClusterAlgorithm::RLECCL,
+                                      ClusterAlgorithm::VCCS,   ClusterAlgorithm::DBSCAN,
+                                      ClusterAlgorithm::HDBSCAN, ClusterAlgorithm::KMeans,
+                                      ClusterAlgorithm::Hierarchical};
   for (auto a : refused) {
     auto params = audit::paramsFor(g);
     params.periodic = true;
@@ -123,7 +123,8 @@ void refusals() {
                 bls::algorithmToString(a) + " did not refuse PBC xyz");
   }
   for (auto a : {ClusterAlgorithm::BLS, ClusterAlgorithm::TraditionalDFS, ClusterAlgorithm::SkipDFS,
-                 ClusterAlgorithm::GCBD, ClusterAlgorithm::CC3DOptimized, ClusterAlgorithm::RLECCLOptimized}) {
+                 ClusterAlgorithm::GCBD, ClusterAlgorithm::CC3DOptimized, ClusterAlgorithm::RLECCLOptimized,
+                 ClusterAlgorithm::VCCSOptimized}) {
     AUDIT_CHECK("PBC-REFUSE", bls::supportsPeriodic(a), bls::algorithmToString(a) + " should support PBC xyz");
   }
 }
