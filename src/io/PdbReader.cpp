@@ -47,9 +47,11 @@ class PdbReader final : public TrajectoryReader {
       for (auto& c : rec) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 
       if (rec == "CRYST1") {
-        if (!parsedCrystal_) {
-          parseCrystal(line);
-        }
+        // Every CRYST1 is honoured: a trajectory may carry one per MODEL (NPT runs,
+        // audit test TRJ-BOX), and the cell in force for a frame is the last CRYST1 read
+        // before or inside its MODEL. Until the audit only the first record was parsed and
+        // every later frame silently reused frame 1's cell.
+        parseCrystal(line);
       } else if (rec == "MODEL ") {
         if (inModel && !coords.empty()) {
           break;
