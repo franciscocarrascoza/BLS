@@ -46,6 +46,14 @@ inline std::size_t idx3(int i, int j, int k, int ny, int nz) {
          static_cast<std::size_t>(j) * nz + static_cast<std::size_t>(k);
 }
 
+// Periodic index wrap, identical to ((a % n) + n) % n for every int a, without the two divisions
+// when a is already inside [0, n) -- the common case (audit Tier 1, finding PBC-PERF).
+inline int wrapIndex(int a, int n) {
+  if (static_cast<unsigned>(a) < static_cast<unsigned>(n)) return a;
+  const int r = a % n;
+  return r < 0 ? r + n : r;
+}
+
 // 6-connectivity deltas
 constexpr int deltas6[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
                                 {0, 1, 0},  {0, 0, -1}, {0, 0, 1}};
@@ -342,9 +350,9 @@ ClusterResult skipDFSImpl(
   // instead (true modulo: a jump can exceed a small dimension).
   auto inside = [nx, ny, nz](int& a, int& b, int& c) {
     if constexpr (Periodic) {
-      a = ((a % nx) + nx) % nx;
-      b = ((b % ny) + ny) % ny;
-      c = ((c % nz) + nz) % nz;
+      a = wrapIndex(a, nx);
+      b = wrapIndex(b, ny);
+      c = wrapIndex(c, nz);
       return true;
     } else {
       return a >= 0 && a < nx && b >= 0 && b < ny && c >= 0 && c < nz;
@@ -522,9 +530,9 @@ ClusterResult dbscanImpl(
     for (const auto& o : ball) {
       int a = i + o[0], b = j + o[1], d = k + o[2];
       if constexpr (Periodic) {
-        a = ((a % nx) + nx) % nx;
-        b = ((b % ny) + ny) % ny;
-        d = ((d % nz) + nz) % nz;
+        a = wrapIndex(a, nx);
+        b = wrapIndex(b, ny);
+        d = wrapIndex(d, nz);
       } else {
         if (a < 0 || a >= nx || b < 0 || b >= ny || d < 0 || d >= nz) continue;
       }
@@ -851,9 +859,9 @@ ClusterResult gcbdImpl(
   // instead (true modulo: a jump can exceed a small dimension).
   auto inside = [nx, ny, nz](int& a, int& b, int& c) {
     if constexpr (Periodic) {
-      a = ((a % nx) + nx) % nx;
-      b = ((b % ny) + ny) % ny;
-      c = ((c % nz) + nz) % nz;
+      a = wrapIndex(a, nx);
+      b = wrapIndex(b, ny);
+      c = wrapIndex(c, nz);
       return true;
     } else {
       return a >= 0 && a < nx && b >= 0 && b < ny && c >= 0 && c < nz;
@@ -1022,7 +1030,9 @@ ClusterResult hdbscanImpl(
   }
   auto axis = [](int d, int len) {
     if constexpr (Periodic) {
-      d = ((d % len) + len) % len;
+      // d is a difference of two coordinates in [0, len), so |d| < len and the min-image
+      // distance ((d mod len) folded) is exactly min(|d|, len - |d|).
+      d = d < 0 ? -d : d;
       return std::min(d, len - d);
     } else {
       return d < 0 ? -d : d;
@@ -1041,6 +1051,7 @@ ClusterResult hdbscanImpl(
   std::vector<long long> core2(static_cast<std::size_t>(n));
   {
     const int maxShell = Periodic ? std::max({nx, ny, nz}) / 2 + 1 : std::max({nx, ny, nz});
+    const int minDim = std::min({nx, ny, nz});
     std::vector<long long> seen;
     std::vector<int> seenVox;
     for (int c = 0; c < n; ++c) {
@@ -1055,16 +1066,21 @@ ClusterResult hdbscanImpl(
               if (std::max({std::abs(di), std::abs(dj), std::abs(dk)}) != s) continue;
               int a = x + di, b = y + dj, d = z + dk;
               if constexpr (Periodic) {
-                a = ((a % nx) + nx) % nx;
-                b = ((b % ny) + ny) % ny;
-                d = ((d % nz) + nz) % nz;
+                a = wrapIndex(a, nx);
+                b = wrapIndex(b, ny);
+                d = wrapIndex(d, nz);
               } else {
                 if (a < 0 || a >= nx || b < 0 || b >= ny || d < 0 || d >= nz) continue;
               }
               const int w = static_cast<int>(idx3(a, b, d, ny, nz));
               if (occupancy[static_cast<std::size_t>(w)] != 1) continue;
-              if constexpr (Periodic) {  // a wrapped offset can revisit a voxel in a small cell
-                if (std::find(seenVox.begin(), seenVox.end(), w) != seenVox.end()) continue;
+              if constexpr (Periodic) {
+                // A wrapped offset can revisit a voxel only once the shell reaches across the cell
+                // (2s + 1 > the shortest axis); below that every offset of the cube [-s, s]^3 is a
+                // distinct voxel, so the search is skipped there. Every voxel is still recorded,
+                // so the search stays complete for the shells that need it.
+                if (2 * s + 1 > minDim &&
+                    std::find(seenVox.begin(), seenVox.end(), w) != seenVox.end()) continue;
                 seenVox.push_back(w);
               }
               const long long dx = axis(a - x, nx), dy = axis(b - y, ny), dz = axis(d - z, nz);
@@ -1445,10 +1461,13 @@ ClusterResult cc3dOptimizedImpl(
   if constexpr (Periodic) {
     // Pairs across a face: from every voxel on a face, every stencil neighbour that lies
     // outside the grid, wrapped. In-grid pairs were all seen by the scan.
+    // Face voxels only, in the same (i, j, k) order as a full sweep that skips the interior
+    // (audit Tier 1, finding PBC-PERF: the full sweep cost a second pass over the grid).
     for (int i = 0; i < nx; ++i) {
       for (int j = 0; j < ny; ++j) {
-        for (int k = 0; k < nz; ++k) {
-          if (i != 0 && i != nx - 1 && j != 0 && j != ny - 1 && k != 0 && k != nz - 1) continue;
+        const bool edgeIJ = i == 0 || i == nx - 1 || j == 0 || j == ny - 1;
+        const int kStep = edgeIJ ? 1 : std::max(1, nz - 1);  // interior (i, j): k = 0 and nz - 1
+        for (int k = 0; k < nz; k += kStep) {
           const unsigned a = L[idx3(i, j, k, ny, nz)];
           if (a == 0u) continue;
           for (int di = -1; di <= 1; ++di)
@@ -2101,9 +2120,9 @@ ClusterResult vccsOptimizedImpl(int nx, int ny, int nz, double seedResolution,
   // Occupied voxel at (i,j,k) -> position in the list, -1 if empty or (non-periodic) outside.
   auto occupiedAt = [&](int i, int j, int k) -> int {
     if constexpr (Periodic) {
-      i = ((i % nx) + nx) % nx;
-      j = ((j % ny) + ny) % ny;
-      k = ((k % nz) + nz) % nz;
+      i = wrapIndex(i, nx);
+      j = wrapIndex(j, ny);
+      k = wrapIndex(k, nz);
     } else {
       if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return -1;
     }
