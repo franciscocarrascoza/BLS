@@ -22,6 +22,18 @@ struct Bounds {
   double maxZ = -std::numeric_limits<double>::infinity();
 };
 
+// std::llround (round half away from zero) without the libm call, for the probe loops
+// (audit 27.09.26, finding BLS-PERF: three libm calls per probe site were 30% of a BLS run).
+// Exact, not an approximation: t = trunc(x) is exact in a double for |x| < 2^52, and so is
+// f = x - t (Sterbenz), so comparing f with +-0.5 decides the rounding exactly as llround
+// does. Larger magnitudes (never a voxel coordinate) fall back to std::llround.
+inline long long roundHalfAway(double x) {
+  if (!(std::fabs(x) < 4503599627370496.0)) return std::llround(x);
+  const long long t = static_cast<long long>(x);
+  const double f = x - static_cast<double>(t);
+  return f >= 0.5 ? t + 1 : (f <= -0.5 ? t - 1 : t);
+}
+
 }  // namespace
 
 // Occupancy-driven enumeration (occupiedSweep). Same seed set as the probe
@@ -195,13 +207,43 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
         }
         if (rowOutside || lo > hi) continue;
 
+        // site = basis * (idx + offset) + origin, evaluated as Mat3::operator* does,
+        // (c0*a + c1*b) + c2*c, with the iz-independent part hoisted: the same operations
+        // in the same order, so every site is bit-identical to the unhoisted form.
+        const Vec3 c0 = basis.column(0), c1 = basis.column(1);
+        const double a = static_cast<double>(ix) + offset.x;
+        const double b = static_cast<double>(iy) + offset.y;
+        const Vec3 pxy = c0 * a + c1 * b;
+        if (c3.x == 0.0 && c3.y == 0.0) {
+          // Rows along z (every cubic basis): c3.x*c and c3.y*c are +-0, and adding a zero
+          // leaves a value unchanged, so site.x = pxy.x + origin.x and site.y likewise for the
+          // whole row. They are rounded once per row; the sites and the seeds are the ones the
+          // general loop below produces, bit for bit.
+          const int vx = static_cast<int>(roundHalfAway(pxy.x + origin.x));
+          const int vy = static_cast<int>(roundHalfAway(pxy.y + origin.y));
+          if (vx < 0 || vy < 0 || vx >= nx || vy >= ny) continue;
+          const std::size_t rowBase =
+              (static_cast<std::size_t>(vx) * static_cast<std::size_t>(ny) +
+               static_cast<std::size_t>(vy)) * static_cast<std::size_t>(nz);
+          const uint8_t* occRow = occupancy ? occupancy->data() + rowBase : nullptr;
+          long long rowProbes = 0;  // local: push_back may alias a member counter
+          for (int iz = static_cast<int>(lo); iz <= static_cast<int>(hi); ++iz) {
+            const double c = static_cast<double>(iz) + offset.z;
+            const int vz = static_cast<int>(roundHalfAway((pxy.z + c3.z * c) + origin.z));
+            if (vz < 0 || vz >= nz) continue;
+            ++rowProbes;
+            if (occRow && !occRow[vz]) continue;
+            provisional.push_back(Seed{vx, vy, vz});
+          }
+          probes_ += rowProbes;
+          continue;
+        }
         for (int iz = static_cast<int>(lo); iz <= static_cast<int>(hi); ++iz) {
-          Vec3 latticeIdx{static_cast<double>(ix), static_cast<double>(iy),
-                          static_cast<double>(iz)};
-          Vec3 site = basis * (latticeIdx + offset) + origin;
-          int vx = static_cast<int>(std::llround(site.x));
-          int vy = static_cast<int>(std::llround(site.y));
-          int vz = static_cast<int>(std::llround(site.z));
+          const double c = static_cast<double>(iz) + offset.z;
+          const Vec3 site = (pxy + c3 * c) + origin;
+          int vx = static_cast<int>(roundHalfAway(site.x));
+          int vy = static_cast<int>(roundHalfAway(site.y));
+          int vz = static_cast<int>(roundHalfAway(site.z));
           if (vx < 0 || vy < 0 || vz < 0 || vx >= nx || vy >= ny || vz >= nz) continue;
           ++probes_;
           if (occupancy) {
@@ -259,27 +301,31 @@ void Enumerator::buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offse
   probes_ = 0;
   std::vector<Seed> provisional;
   auto wrap = [](long long v, int n) {
+    if (v >= 0 && v < n) return static_cast<int>(v);  // the common case, no division
     long long r = v % n;
     return static_cast<int>(r < 0 ? r + n : r);
   };
   for (const auto& offset : offsets) {
+    const Vec3 c0 = basis.column(0), c1 = basis.column(1), c2 = basis.column(2);
     for (int ix = 0; ix < cells[0]; ++ix) {
       for (int iy = 0; iy < cells[1]; ++iy) {
+        // Hoisted as in build(): bit-identical to basis * (idx + offset) + origin.
+        const Vec3 pxy = c0 * (static_cast<double>(ix) + offset.x) +
+                         c1 * (static_cast<double>(iy) + offset.y);
+        // The periodic basis is diagonal (commensurate cubic, D10): c2 = (0, 0, a_z), so x and
+        // y are constant along the row, exactly as in build() (adding +-0 changes nothing).
+        const int rx = wrap(roundHalfAway(pxy.x + origin.x), nx);
+        const int ry = wrap(roundHalfAway(pxy.y + origin.y), ny);
+        const std::size_t rowBase =
+            (static_cast<std::size_t>(rx) * static_cast<std::size_t>(ny) +
+             static_cast<std::size_t>(ry)) * static_cast<std::size_t>(nz);
+        const uint8_t* occRow = occupancy.data() + rowBase;
         for (int iz = 0; iz < cells[2]; ++iz) {
-          Vec3 latticeIdx{static_cast<double>(ix), static_cast<double>(iy),
-                          static_cast<double>(iz)};
-          Vec3 site = basis * (latticeIdx + offset) + origin;
-          const int vx = wrap(std::llround(site.x), nx);
-          const int vy = wrap(std::llround(site.y), ny);
-          const int vz = wrap(std::llround(site.z), nz);
-          ++probes_;
-          std::size_t idx = static_cast<std::size_t>(vx) * static_cast<std::size_t>(ny) *
-                                static_cast<std::size_t>(nz) +
-                            static_cast<std::size_t>(vy) * static_cast<std::size_t>(nz) +
-                            static_cast<std::size_t>(vz);
-          if (!occupancy[idx]) continue;
-          provisional.push_back(Seed{vx, vy, vz});
+          const int vz = wrap(roundHalfAway((pxy.z + c2.z * (static_cast<double>(iz) + offset.z)) + origin.z), nz);
+          if (!occRow[vz]) continue;
+          provisional.push_back(Seed{rx, ry, vz});
         }
+        probes_ += cells[2];  // every site of the row is evaluated once
       }
     }
   }
