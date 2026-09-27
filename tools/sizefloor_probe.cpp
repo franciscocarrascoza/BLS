@@ -13,25 +13,21 @@
 // the partition measured here is the partition the campaign produced. Nothing
 // is reimplemented.
 //
-// ORIGIN OFFSETS. BLS's lattice is anchored to the grid origin, so the answer
-// depends on where the lattice falls relative to the structure. Translating the
-// coordinates alone is a NO-OP under BOX AUTO: with no usable cell the origin
-// is minPos, so the origin translates with the atoms and the lattice phase is
-// unchanged. BOX MANUAL is defect 12 (main.cpp ignores it). The mechanism used
-// here is the Task 10B one: a FIXED cell, supplied the way a CRYST1 record
-// supplies one, with the atoms translated inside it. The cell is identical for
-// every offset and every lattice, so nx, ny, nz and the voxelisation are fixed
-// and only the lattice phase moves.
+// ORIGIN OFFSETS (audit 27.09.26, finding S2-3). An offset is a translation of the
+// probe lattice, deck LATTICE_ORIGIN, never of the atoms: the occupancy grid and the
+// DFS ground truth are then identical at every offset by construction, and only the
+// lattice phase moves. The offset set is named on the command line (tools/offset_set.hpp):
+// halton64 = (0,0,0) + 63 Halton points spread over one conventional cell of the probe
+// lattice (3-D, sub-voxel); diagonal8 = the pre-audit (k,k,k) set, k = 0..7, expressed
+// as the equivalent lattice translation (-k,-k,-k), for the PBC-none reproduction.
 //
-// Offsets are INTEGER voxel translations (k,k,k) for k = 0..7. Two reasons:
-//   - an integer-voxel translation is a pure index shift of the occupancy, so
-//     the DFS ground truth is identical across offsets and the size histogram
-//     has a stable denominator. Anything else would change what is being
-//     measured at the same time as the lattice phase.
-//   - the lattice period is dNN = 2.4 voxels at the E1 deck, which is not
-//     commensurate with the voxel grid, so k mod 2.4 for k = 0..7 samples eight
-//     distinct phases spread across the period (0, 1, 2, 0.6, 1.6, 0.2, 1.2,
-//     2.2). A {0,1}^3 corner set would sample only two.
+// THE CELL. PBC none (the pre-audit mechanism, Task 10B): a FIXED cell, supplied the way
+// a CRYST1 record supplies one, with the atoms translated inside it. Under BOX AUTO a
+// translation of the coordinates alone is a no-op (the origin is minPos), which is why a
+// fixed cell is used; its size, including the room the old atom offsets needed, is kept
+// so the grid is the pre-audit one. PBC xyz: the deck's cell (BOX CELL / BOX MANUAL),
+// untouched. In both cases the DFS grid is built with the shared builder
+// (deriveGridSpec, configureGrid) from the same frame BLS gets.
 //
 // Recall and component sizes are integers produced by a deterministic
 // traversal of a deterministic grid. They do not vary between runs, so this
@@ -43,8 +39,8 @@
 // so the mechanism can be replayed through the shipped bls_analyze and the two
 // paths compared. run_sizefloor.sh does that once per sweep.
 //
-//   bls_sizefloor <system.pdb> <config.in> <lattice> <P|I|F> <offset 0..7>
-//                 [--dump-pdb <out.pdb>]
+//   bls_sizefloor <system.pdb> <config.in> <lattice> <P|I|F> <offset>
+//                 --offsets <halton64|diagonal8> [--dump-pdb <out.pdb>]
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -59,40 +55,44 @@
 #include "cluster/Algorithms.hpp"
 #include "config/Parser.hpp"
 #include "grid/Grid.hpp"
+#include "grid/GridSpec.hpp"
 #include "io/TrajectoryReader.hpp"
+#include "offset_set.hpp"
 
 using namespace bls;
 
-// Voxels of clearance kept between the atoms and each face of the fixed cell.
-// It has to exceed the largest offset (7 voxels) so that no offset pushes an
-// atom out of the cell: the analysis box is NonPeriodic under BOX AUTO, so an
-// atom outside it would be clipped rather than wrapped, and the ground truth
-// would then differ between offsets for a reason that has nothing to do with
-// the lattice.
+// PBC none: voxels of clearance kept between the atoms and each face of the fixed cell,
+// and the room the pre-audit atom offsets (up to 7 voxels) needed. Both stay in the cell
+// size so the grid is the pre-audit one; the atoms are no longer moved.
 static const int kPadVoxels = 10;
 static const int kMaxOffset = 7;
 
 int main(int argc, char** argv) {
-  if (argc != 6 && argc != 8) {
-    std::fprintf(stderr,
-                 "usage: %s <system.pdb> <config.in> "
-                 "<cubic|hexagonal|triclinic> <P|I|F> <offset 0..7> "
-                 "[--dump-pdb <out.pdb>]\n", argv[0]);
+  const char* usage =
+      "usage: %s <system.pdb> <config.in> <cubic|hexagonal|triclinic> <P|I|F> <offset> "
+      "--offsets <halton64|diagonal8> [--dump-pdb <out.pdb>]\n";
+  if (argc < 6) {
+    std::fprintf(stderr, usage, argv[0]);
     return 2;
   }
   const std::string sys = argv[1], conf = argv[2];
   const std::string latName = argv[3], cenName = argv[4];
   const int offset = std::atoi(argv[5]);
-  std::string dumpPdb;
-  if (argc == 8) {
-    if (std::string(argv[6]) != "--dump-pdb") {
-      std::fprintf(stderr, "unknown option '%s'\n", argv[6]);
-      return 2;
-    }
-    dumpPdb = argv[7];
+  std::string dumpPdb, offsetSet;
+  for (int i = 6; i < argc; ++i) {
+    const std::string opt = argv[i];
+    if (i + 1 >= argc) { std::fprintf(stderr, usage, argv[0]); return 2; }
+    if (opt == "--dump-pdb") dumpPdb = argv[++i];
+    else if (opt == "--offsets") offsetSet = argv[++i];
+    else { std::fprintf(stderr, "unknown option '%s'\n", opt.c_str()); return 2; }
   }
-  if (offset < 0 || offset > kMaxOffset) {
-    std::fprintf(stderr, "offset must be 0..%d\n", kMaxOffset);
+  const int nOffsets = bls_tools::offsetCount(offsetSet);
+  if (nOffsets == 0) {
+    std::fprintf(stderr, "--offsets must be halton64 or diagonal8\n");
+    return 2;
+  }
+  if (offset < 0 || offset >= nOffsets) {
+    std::fprintf(stderr, "offset must be 0..%d for %s\n", nOffsets - 1, offsetSet.c_str());
     return 2;
   }
 
@@ -129,62 +129,79 @@ int main(int argc, char** argv) {
   }
   if (frame.xyz.empty()) { std::fprintf(stderr, "empty frame\n"); return 1; }
 
-  // ---- the fixed cell, and the atoms translated inside it -----------------
-  const double gs = config.gridSpacing;
-  const double pad = kPadVoxels * gs;
-  Vec3 mn = frame.xyz[0], mx = frame.xyz[0];
-  for (const auto& p : frame.xyz) {
-    mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
-    mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
-  }
-  // Cell dimensions do not depend on the offset: extent, clearance on both
-  // faces, and room for the largest offset. Every cell of the matrix therefore
-  // rasterises onto exactly the same grid.
-  // Rounded UP to a whole number of grid spacings on every axis. Grid sizes
-  // its voxels as box/n with n = ceil(box/spacing), so unless the cell is an
-  // exact multiple of the spacing the voxel is slightly SMALLER than
-  // GRID_SPACING and a translation by k*GRID_SPACING is not a translation by k
-  // voxels. Measured before this rounding was added: the occupied-voxel count
-  // drifted across offsets (21416, 21416, 21408, 21399, ...), which would have
-  // moved the ground truth and the lattice phase at the same time. With the
-  // cell an exact multiple, box/n == spacing and the shift is exactly k voxels.
-  auto upToSpacing = [gs](double v) { return std::ceil(v / gs) * gs; };
-  const Vec3 cell{upToSpacing(mx.x - mn.x + 2 * pad + kMaxOffset * gs),
-                  upToSpacing(mx.y - mn.y + 2 * pad + kMaxOffset * gs),
-                  upToSpacing(mx.z - mn.z + 2 * pad + kMaxOffset * gs)};
-  const Vec3 shift{pad - mn.x + offset * gs,
-                   pad - mn.y + offset * gs,
-                   pad - mn.z + offset * gs};
-  for (auto& p : frame.xyz) p += shift;
-  frame.box = Mat3{Vec3{cell.x, 0, 0}, Vec3{0, cell.y, 0}, Vec3{0, 0, cell.z}};
+  const bool periodic = config.pbc.all();
+  if (!periodic) {
+    // ---- PBC none: the fixed cell, and the atoms translated inside it -------
+    const double gs = config.gridSpacing;
+    const double pad = kPadVoxels * gs;
+    Vec3 mn = frame.xyz[0], mx = frame.xyz[0];
+    for (const auto& p : frame.xyz) {
+      mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
+      mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
+    }
+    // Rounded UP to a whole number of grid spacings on every axis. Grid sizes its
+    // voxels as box/n with n = ceil(box/spacing), so unless the cell is an exact
+    // multiple of the spacing the voxel is slightly SMALLER than GRID_SPACING. The
+    // pre-audit atom offsets needed the voxel to be exactly GRID_SPACING (measured
+    // before this rounding: the occupied-voxel count drifted across offsets, 21416,
+    // 21416, 21408, 21399, ...); it is kept so the grid is unchanged.
+    auto upToSpacing = [gs](double v) { return std::ceil(v / gs) * gs; };
+    const Vec3 cell{upToSpacing(mx.x - mn.x + 2 * pad + kMaxOffset * gs),
+                    upToSpacing(mx.y - mn.y + 2 * pad + kMaxOffset * gs),
+                    upToSpacing(mx.z - mn.z + 2 * pad + kMaxOffset * gs)};
+    const Vec3 shift{pad - mn.x, pad - mn.y, pad - mn.z};
+    for (auto& p : frame.xyz) p += shift;
+    frame.box = Mat3{Vec3{cell.x, 0, 0}, Vec3{0, cell.y, 0}, Vec3{0, 0, cell.z}};
 
-  // A cell more than 10x the coordinate extent is rejected by BOX AUTO as
-  // implausible and replaced by a fitted bounding box, which would silently
-  // undo the whole mechanism. Check rather than assume.
-  if (cell.x > (mx.x - mn.x) * 10.0 || cell.y > (mx.y - mn.y) * 10.0 ||
-      cell.z > (mx.z - mn.z) * 10.0) {
-    std::fprintf(stderr, "fixed cell exceeds 10x the coordinate extent; "
-                         "BOX AUTO would discard it\n");
+    // A cell more than 10x the coordinate extent is rejected by BOX AUTO as
+    // implausible and replaced by a fitted bounding box, which would silently
+    // undo the whole mechanism. Check rather than assume.
+    if (cell.x > (mx.x - mn.x) * 10.0 || cell.y > (mx.y - mn.y) * 10.0 ||
+        cell.z > (mx.z - mn.z) * 10.0) {
+      std::fprintf(stderr, "fixed cell exceeds 10x the coordinate extent; "
+                           "BOX AUTO would discard it\n");
+      return 1;
+    }
+
+    if (!dumpPdb.empty()) {
+      // Written after the translation, so the file carries the same cell and the
+      // same coordinates the measurement below uses. Water only: the E1 systems
+      // are O and H, and the element column is not read back by PdbReader.
+      std::FILE* fh = std::fopen(dumpPdb.c_str(), "w");
+      if (!fh) { std::fprintf(stderr, "cannot write %s\n", dumpPdb.c_str()); return 1; }
+      std::fprintf(fh, "CRYST1%9.3f%9.3f%9.3f%7.2f%7.2f%7.2f P 1           1\n",
+                   cell.x, cell.y, cell.z, 90.0, 90.0, 90.0);
+      for (std::size_t i = 0; i < frame.xyz.size(); ++i) {
+        const Vec3& p = frame.xyz[i];
+        std::fprintf(fh,
+                     "ATOM  %5d  O   HOH A%4d    %8.3f%8.3f%8.3f  1.00  0.00           O\n",
+                     (int)((i % 99999) + 1), (int)((i / 3 % 9999) + 1), p.x, p.y, p.z);
+      }
+      std::fprintf(fh, "END\n");
+      std::fclose(fh);
+    }
+  } else if (!dumpPdb.empty()) {
+    std::fprintf(stderr, "--dump-pdb is for PBC none (the fixed-cell round trip)\n");
+    return 2;
+  }
+
+  // ---- the grid, from the shared builder; the offset in the probe basis ----
+  GridSpec spec;
+  if (!deriveGridSpec(config, frame, nullptr, spec, err)) {
+    std::fprintf(stderr, "grid: %s\n", err.c_str());
     return 1;
   }
-
-  if (!dumpPdb.empty()) {
-    // Written after the translation, so the file carries the same cell and the
-    // same coordinates the measurement below uses. Water only: the E1 systems
-    // are O and H, and the element column is not read back by PdbReader.
-    std::FILE* fh = std::fopen(dumpPdb.c_str(), "w");
-    if (!fh) { std::fprintf(stderr, "cannot write %s\n", dumpPdb.c_str()); return 1; }
-    std::fprintf(fh, "CRYST1%9.3f%9.3f%9.3f%7.2f%7.2f%7.2f P 1           1\n",
-                 cell.x, cell.y, cell.z, 90.0, 90.0, 90.0);
-    for (std::size_t i = 0; i < frame.xyz.size(); ++i) {
-      const Vec3& p = frame.xyz[i];
-      std::fprintf(fh,
-                   "ATOM  %5d  O   HOH A%4d    %8.3f%8.3f%8.3f  1.00  0.00           O\n",
-                   (int)((i % 99999) + 1), (int)((i / 3 % 9999) + 1), p.x, p.y, p.z);
-    }
-    std::fprintf(fh, "END\n");
-    std::fclose(fh);
+  const int nx = spec.nx, ny = spec.ny, nz = spec.nz;
+  Mat3 basis;
+  double dnnVoxel = 0.0;
+  if (!Analyzer(config).probeBasis(nx, ny, nz, periodic, basis, dnnVoxel, err)) {
+    std::fprintf(stderr, "bls: %s\n", err.c_str());
+    return 1;
   }
+  const Vec3 origin = bls_tools::latticeOrigin(offsetSet, offset, basis);
+  config.latticeOrigin[0] = origin.x;
+  config.latticeOrigin[1] = origin.y;
+  config.latticeOrigin[2] = origin.z;
 
   // ---- BLS, through the shipped Analyzer, with labels ---------------------
   Analyzer analyzer(config);
@@ -195,26 +212,22 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // ---- DFS ground truth, on a grid built the same way ---------------------
-  const int nx = std::max(1, (int)std::ceil(cell.x / gs));
-  const int ny = std::max(1, (int)std::ceil(cell.y / gs));
-  const int nz = std::max(1, (int)std::ceil(cell.z / gs));
+  // ---- DFS ground truth, on the same grid spec ----------------------------
   Grid grid;
-  grid.configure(nx, ny, nz, gs, frame.box, Vec3{0, 0, 0},
-                 periodicityFor(config.pbc));
+  configureGrid(grid, spec);
   grid.rasterize(frame.xyz, nullptr, config.cutoff, config.occupancy);
 
   ClusterParams params;
   params.nx = nx; params.ny = ny; params.nz = nz;
   params.connectivity = config.connectivity;
-  params.periodic = config.pbc.all();  // deck PBC xyz: same periodicity as the grid and as BLS
+  params.periodic = periodic;  // deck PBC xyz: same periodicity as the grid and as BLS
   std::vector<int> dfsLabels;
   ClusterResult dfs = runClusterAlgorithm(ClusterAlgorithm::TraditionalDFS, params,
                                           grid.occupancy(), grid.visited(), &dfsLabels);
 
   // ---- grid agreement between the BLS path and the DFS path --------------
-  // The two paths build their grids from the same box by the same rule but in
-  // different translation units, so the agreement is checked, not assumed.
+  // Both paths use the shared builder on the same frame, so the agreement should
+  // hold by construction; it is still checked, not assumed.
   // Dimensions first, then the stronger test: every voxel BLS labelled must be
   // occupied on the DFS grid. A disagreement in origin, spacing or stencil
   // would put at least one BLS label on a voxel this grid calls empty.
@@ -275,13 +288,15 @@ int main(int argc, char** argv) {
   int merged = 0;
   for (const auto& kv : dfsOfBls) if (kv.second.size() > 1) ++merged;
 
-  std::printf("CELL system=%s lattice=%s centering=%s offset=%d "
+  std::printf("CELL system=%s lattice=%s centering=%s offset=%d offset_set=%s "
+              "origin=%.6f,%.6f,%.6f pbc=%s dnn_vox=%.6f "
               "nx=%d ny=%d nz=%d occupied=%zu "
               "dfs_nclusters=%d dfs_max=%d "
               "bls_nclusters=%d bls_max=%d bls_seeds=%d bls_seedhits=%d "
               "present=%d found=%d missed=%d largest_missed=%d smallest_found=%d "
               "truncated=%d split=%d merged=%d grid_ok=%d\n",
-              sys.c_str(), latName.c_str(), cenName.c_str(), offset,
+              sys.c_str(), latName.c_str(), cenName.c_str(), offset, offsetSet.c_str(),
+              origin.x, origin.y, origin.z, periodic ? "xyz" : "none", metrics.dnnVoxel,
               nx, ny, nz, occupied,
               dfs.nclusters, dfs.maxCluster,
               metrics.nclusters, metrics.maxCluster, metrics.seeds, metrics.seedHits,

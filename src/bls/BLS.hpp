@@ -71,6 +71,13 @@ class Analyzer {
   bool labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
                  std::vector<int>* labels = nullptr);
 
+  // The probe-lattice basis (columns, voxels) and dNN (voxels) labelGrid uses on an
+  // nx x ny x nz grid: the scaled basis, or under PBC its commensurate cubic form (audit
+  // D10; false with err set where labelGrid would refuse the lattice). labelGrid calls
+  // this; tools use it to place LATTICE_ORIGIN offsets inside one conventional cell.
+  bool probeBasis(int nx, int ny, int nz, bool periodic, Mat3& basis, double& dnnVoxel,
+                  std::string& err) const;
+
   double gridSpacing() const { return config_.gridSpacing; }
 
  private:

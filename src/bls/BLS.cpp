@@ -98,6 +98,15 @@ bool Analyzer::processFrame(const Frame& frame, FrameMetrics& metrics, std::stri
   return true;
 }
 
+bool Analyzer::probeBasis(int nx, int ny, int nz, bool periodic, Mat3& basis, double& dnnVoxel,
+                          std::string& err) const {
+  basis = impl_->scaledBasis;
+  dnnVoxel = impl_->dnnVoxel;
+  if (!periodic) return true;
+  return commensurateCubicBasis(impl_->latticeSettings, impl_->lattice, impl_->dnnVoxel, nx, ny,
+                                nz, basis, dnnVoxel, err);
+}
+
 bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
                          std::vector<int>* labels) {
   ScopedTimer timer;
@@ -115,12 +124,9 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
   // commensurate with the periodic grid (audit D10) -- per frame, since the grid
   // dimensions can change between frames -- and the reported dNN is the effective one.
   const bool periodic = grid.periodicity() == BoxPeriodicity::Periodic;
-  double dnnVoxel = impl_->dnnVoxel;
-  Mat3 basis = impl_->scaledBasis;
-  if (periodic && !commensurateCubicBasis(impl_->latticeSettings, impl_->lattice,
-                                          impl_->dnnVoxel, nx, ny, nz, basis, dnnVoxel, err)) {
-    return false;
-  }
+  double dnnVoxel = 0.0;
+  Mat3 basis;
+  if (!probeBasis(nx, ny, nz, periodic, basis, dnnVoxel, err)) return false;
   const Vec3 latticeOrigin{config_.latticeOrigin[0], config_.latticeOrigin[1],
                            config_.latticeOrigin[2]};  // deck LATTICE_ORIGIN, voxels
   const Enumerator enumerator =
