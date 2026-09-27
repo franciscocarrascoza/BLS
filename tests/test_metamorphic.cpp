@@ -123,6 +123,11 @@ struct Method {
   //   kmeans- centroids initialised at points[(i*numPoints)/k], indices into a
   //           list built by scanning the grid in (i,j,k) order, so the
   //           initialisation rotates with the scan and not with the geometry
+  //   dbscan- as published (Ester et al. 1996, §4.1), a border point shared by
+  //           two clusters "will be assigned to the cluster discovered first",
+  //           i.e. by scan order ("except from these rare situations, the
+  //           result ... is independent of the order"): sizes may change under
+  //           a rotation or reflection that changes the scan order
   bool anchored{false};
 };
 
@@ -147,7 +152,7 @@ std::vector<Method> methods() {
   };
   for (auto& x : v) {
     if (x.algo == ClusterAlgorithm::KMeans || x.algo == ClusterAlgorithm::VCCS ||
-        x.algo == ClusterAlgorithm::VCCSOptimized) {
+        x.algo == ClusterAlgorithm::VCCSOptimized || x.algo == ClusterAlgorithm::DBSCAN) {
       x.anchored = true;
     }
   }

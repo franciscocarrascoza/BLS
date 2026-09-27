@@ -2,6 +2,7 @@
 //
 // Guards decision / claim IDs:
 //   PBC-M      traditional_dfs, gcbd, cc3d_optimized (6 and 26) and rle_ccl_optimized under PBC xyz label
+//              (and DBSCAN at MinPts 1, Eps 1 reduces to them)
 //              exactly the periodic components (union-find oracle with wrap-around), on random grids that
 //              include 1-, 2- and 3-voxel dimensions; skip_dfs at unit stride (Tier 1, D8) gives the same
 //              component count and sizes
@@ -86,6 +87,17 @@ void periodicPartitions() {
         AUDIT_CHECK("PBC-NONE", audit::canonical(open) == audit::canonical(dfsOpen),
                     std::string(m.name) + " " + shape + ": PBC none partition changed");
       }
+      // DBSCAN (Ester et al. 1996) at MinPts 1, Eps 1: every point is core and N_Eps is the 6-neighbourhood,
+      // so its clusters are the periodic 6-connected components.
+      {
+        auto pd = audit::paramsFor(g);
+        pd.eps = 1.0;
+        pd.minPts = 1;
+        pd.periodic = true;
+        const auto d = audit::runUnlabelled(ClusterAlgorithm::DBSCAN, g, pd);
+        AUDIT_CHECK("PBC-M", d.clusterSizes == audit::sizesOf(audit::periodicComponents(g, 6)),
+                    "dbscan(minPts 1, eps 1) " + shape + ": periodic clusters != periodic components");
+      }
       // skip_dfs at unit stride: no label output; count and sizes.
       auto params = audit::paramsFor(g);
       params.skipDfsJumpDistance = 1;
@@ -105,10 +117,9 @@ void periodicPartitions() {
 void refusals() {
   std::mt19937_64 rng(7);
   const auto g = audit::randomGrid(rng, 8, 8, 8, 0.3);
-  const ClusterAlgorithm refused[] = {ClusterAlgorithm::CC3D,   ClusterAlgorithm::RLECCL,
-                                      ClusterAlgorithm::VCCS,   ClusterAlgorithm::DBSCAN,
-                                      ClusterAlgorithm::HDBSCAN, ClusterAlgorithm::KMeans,
-                                      ClusterAlgorithm::Hierarchical};
+  const ClusterAlgorithm refused[] = {ClusterAlgorithm::CC3D,    ClusterAlgorithm::RLECCL,
+                                      ClusterAlgorithm::VCCS,    ClusterAlgorithm::HDBSCAN,
+                                      ClusterAlgorithm::KMeans,  ClusterAlgorithm::Hierarchical};
   for (auto a : refused) {
     auto params = audit::paramsFor(g);
     params.periodic = true;
@@ -124,7 +135,7 @@ void refusals() {
   }
   for (auto a : {ClusterAlgorithm::BLS, ClusterAlgorithm::TraditionalDFS, ClusterAlgorithm::SkipDFS,
                  ClusterAlgorithm::GCBD, ClusterAlgorithm::CC3DOptimized, ClusterAlgorithm::RLECCLOptimized,
-                 ClusterAlgorithm::VCCSOptimized}) {
+                 ClusterAlgorithm::VCCSOptimized, ClusterAlgorithm::DBSCAN}) {
     AUDIT_CHECK("PBC-REFUSE", bls::supportsPeriodic(a), bls::algorithmToString(a) + " should support PBC xyz");
   }
 }

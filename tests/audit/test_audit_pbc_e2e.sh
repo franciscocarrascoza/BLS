@@ -114,7 +114,7 @@ for a in traditional_dfs skip_dfs gcbd cc3d_optimized rle_ccl_optimized; do
 done
 
 # Refusals: methods without periodic adjacency, hexagonal probe lattice under PBC (D10).
-for a in cc3d rle_ccl vccs dbscan hdbscan kmeans hierarchical; do
+for a in cc3d rle_ccl vccs hdbscan kmeans hierarchical; do
   extra=(); [[ $a == kmeans ]] && extra=(--algo-k 2)
   run_algo pbc.in "refuse_$a.csv" "$a" "${extra[@]}"; rc=$?
   check E2E-REFUSE "$([[ $rc != 0 ]] && grep -q "PBC is not implemented" "$WORK/stderr_refuse_$a.csv.log" && echo 1)" \

@@ -139,12 +139,14 @@ ClusterResult skipDFS(
     std::vector<int>* labels = nullptr,
     bool periodic = false);
 
-// DBSCAN clustering with grid-based spatial indexing
+// DBSCAN as published: Ester, Kriegel, Sander & Xu, KDD-96 (Definitions 1-6, §4.1 DBSCAN /
+// ExpandCluster); noise is not counted. See the definition.
 ClusterResult dbscan(
     int nx, int ny, int nz,
     double eps, int minPts,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    bool periodic = false);
 
 // Hierarchical (single-linkage) clustering
 ClusterResult hierarchical(

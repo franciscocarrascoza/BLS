@@ -154,9 +154,10 @@ bool supportsPeriodic(ClusterAlgorithm algo) {
     case ClusterAlgorithm::CC3DOptimized:
     case ClusterAlgorithm::RLECCLOptimized:
     case ClusterAlgorithm::VCCSOptimized:
+    case ClusterAlgorithm::DBSCAN:  // Ester et al. 1996 with minimum-image distances
       return true;
     default:
-      // Withdrawn textbook tracks (cc3d, rle_ccl, vccs), withdrawn DBSCAN/HDBSCAN (D4/D5),
+      // Withdrawn textbook tracks (cc3d, rle_ccl, vccs), HDBSCAN (until HDBSCAN* is in),
       // k-means (declared non-periodic, D11), hierarchical (SI only).
       return false;
   }
@@ -191,7 +192,8 @@ ClusterResult runClusterAlgorithm(
       return skipDFS(params.nx, params.ny, params.nz, params.skipDfsJumpDistance, occupancy,
                      visited, labels, params.periodic);
     case ClusterAlgorithm::DBSCAN:
-      return dbscan(params.nx, params.ny, params.nz, params.eps, params.minPts, occupancy, visited);
+      return dbscan(params.nx, params.ny, params.nz, params.eps, params.minPts, occupancy, visited,
+                    params.periodic);
     case ClusterAlgorithm::Hierarchical:
       return hierarchical(params.nx, params.ny, params.nz, params.threshold, occupancy, visited,
                           labels);
@@ -445,8 +447,36 @@ ClusterResult skipDFS(int nx, int ny, int nz, int skip, const std::vector<uint8_
                   : skipDFSImpl<false>(nx, ny, nz, skip, occupancy, visited, labels);
 }
 
-// DBSCAN with grid-based spatial indexing
-ClusterResult dbscan(
+namespace {
+
+// ── DBSCAN ────────────────────────────────────────────────────────────────────
+//
+// As PUBLISHED: M. Ester, H.-P. Kriegel, J. Sander, X. Xu, "A density-based algorithm for
+// discovering clusters in large spatial databases with noise", Proc. KDD-96, pp. 226-231,
+// Definitions 1-6 and §4.1 (functions DBSCAN and ExpandCluster). Audit 27.09.26
+// (decision D4/D5 revised): replaces an expansion that grew clusters from every point
+// reached, border points included (finding S1-10).
+//
+//   N_Eps(p) = { q : dist(p, q) <= Eps } (Definition 1), Euclidean distance between voxel
+//   centres in voxel units, p included. SetOfPoints = the occupied voxels in raster order.
+//   DBSCAN: for each point in that order, if it is UNCLASSIFIED, ExpandCluster(point, ClId)
+//   and take the next ClId when it returns true.
+//   ExpandCluster: seeds = regionQuery(point, Eps); fewer than MinPts -> point is NOISE,
+//   return false. Otherwise every seed gets ClId (changeClIds), the point is deleted from
+//   the seeds, and while seeds remain: currentP = first seed; result = regionQuery(currentP);
+//   if |result| >= MinPts, every result point that is UNCLASSIFIED or NOISE gets ClId and,
+//   if it was UNCLASSIFIED, is appended to the seeds; delete currentP.
+// Noise points belong to no cluster and are not counted. The region query enumerates the
+// integer offsets within Eps (the paper assumes a spatial access method; the neighbourhood
+// is the same set); results and seeds follow offset order (dx, dy, dz) lexicographically.
+// A border point that lies in two clusters "will be assigned to the cluster discovered first"
+// (§4.1 text). The pseudocode's changeClIds(seeds, ClId) would, read literally, move such a
+// point to the later cluster when it lies in that cluster's first neighbourhood; the stated
+// outcome is followed, i.e. changeClIds relabels only points not yet in a cluster (the only
+// difference between the two readings; measured on the audit tests: 5 of 61 grids).
+// Under PBC xyz, coordinates wrap and distances are minimum-image.
+template <bool Periodic>
+ClusterResult dbscanImpl(
     int nx, int ny, int nz,
     double eps, int minPts,
     const std::vector<uint8_t>& occupancy,
@@ -455,144 +485,118 @@ ClusterResult dbscan(
   ScopedTimer timer;
   ClusterResult result;
 
-  std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
+  const std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
 
-  // Collect occupied points
-  std::vector<Point> points;
-  points.reserve(totalSize / 10);  // Estimate
-
-  for (int i = 0; i < nx; ++i) {
-    for (int j = 0; j < ny; ++j) {
-      for (int k = 0; k < nz; ++k) {
-        std::size_t idx = idx3(i, j, k, ny, nz);
-        if (occupancy[idx] == 1) {
-          points.push_back({i, j, k});
-        }
-      }
-    }
-  }
-
-  int numPoints = static_cast<int>(points.size());
-  if (numPoints == 0) {
+  std::vector<int> occVox;
+  for (std::size_t i = 0; i < totalSize; ++i)
+    if (occupancy[i] == 1) occVox.push_back(static_cast<int>(i));
+  const int nOcc = static_cast<int>(occVox.size());
+  if (nOcc == 0) {
     result.elapsedMs = timer.elapsedMilliseconds();
     return result;
   }
+  auto compactOf = [&occVox](int v) {
+    auto it = std::lower_bound(occVox.begin(), occVox.end(), v);
+    return (it != occVox.end() && *it == v) ? static_cast<int>(it - occVox.begin()) : -1;
+  };
+  const int planeYZ = ny * nz;
 
-  // Build spatial grid index
-  int cellSize = static_cast<int>(std::ceil(eps));
-  int gridCellsX = (nx + cellSize - 1) / cellSize;
-  int gridCellsY = (ny + cellSize - 1) / cellSize;
-  int gridCellsZ = (nz + cellSize - 1) / cellSize;
+  // Integer offsets with dist <= Eps, lexicographic.
+  const int r = static_cast<int>(std::floor(eps));
+  std::vector<std::array<int, 3>> ball;
+  for (int di = -r; di <= r; ++di)
+    for (int dj = -r; dj <= r; ++dj)
+      for (int dk = -r; dk <= r; ++dk)
+        if (static_cast<double>(di * di + dj * dj + dk * dk) <= eps * eps) ball.push_back({di, dj, dk});
+  // In a periodic axis shorter than the ball's diameter two offsets reach one voxel.
+  const bool dedupe = Periodic && (nx < 2 * r + 1 || ny < 2 * r + 1 || nz < 2 * r + 1);
 
-  std::vector<std::vector<int>> cells(
-      static_cast<std::size_t>(gridCellsX) * gridCellsY * gridCellsZ);
-
-  auto cellIdx = [&](int ci, int cj, int ck) {
-    return static_cast<std::size_t>(ci) * gridCellsY * gridCellsZ +
-           static_cast<std::size_t>(cj) * gridCellsZ + ck;
+  auto regionQuery = [&](int c, std::vector<int>& out) {
+    out.clear();
+    const int v = occVox[static_cast<std::size_t>(c)];
+    const int i = v / planeYZ, j = (v - i * planeYZ) / nz, k = v % nz;
+    for (const auto& o : ball) {
+      int a = i + o[0], b = j + o[1], d = k + o[2];
+      if constexpr (Periodic) {
+        a = ((a % nx) + nx) % nx;
+        b = ((b % ny) + ny) % ny;
+        d = ((d % nz) + nz) % nz;
+      } else {
+        if (a < 0 || a >= nx || b < 0 || b >= ny || d < 0 || d >= nz) continue;
+      }
+      const std::size_t w = idx3(a, b, d, ny, nz);
+      if (occupancy[w] == 1) out.push_back(compactOf(static_cast<int>(w)));
+    }
+    if (dedupe) {
+      std::vector<int> seen;
+      std::vector<int> uniq;
+      for (int q : out)
+        if (std::find(seen.begin(), seen.end(), q) == seen.end()) { seen.push_back(q); uniq.push_back(q); }
+      out.swap(uniq);
+    }
   };
 
-  for (int p = 0; p < numPoints; ++p) {
-    int ci = points[p].i / cellSize;
-    int cj = points[p].j / cellSize;
-    int ck = points[p].k / cellSize;
-    cells[cellIdx(ci, cj, ck)].push_back(p);
-  }
+  constexpr int UNCLASSIFIED = -2, NOISE = -1;
+  std::vector<int> clId(static_cast<std::size_t>(nOcc), UNCLASSIFIED);
+  std::vector<int> seeds, res;
 
-  std::vector<bool> pointVisited(numPoints, false);
-  std::vector<StackElement> stack;
-  stack.reserve(1000);
-
-  for (int p = 0; p < numPoints; ++p) {
-    if (pointVisited[p]) continue;
-
-    Point curr = points[p];
-    int ci = curr.i / cellSize;
-    int cj = curr.j / cellSize;
-    int ck = curr.k / cellSize;
-
-    // Count neighbors
-    int neighbors = 0;
-    for (int di = -1; di <= 1; ++di) {
-      for (int dj = -1; dj <= 1; ++dj) {
-        for (int dk = -1; dk <= 1; ++dk) {
-          int nci = ci + di, ncj = cj + dj, nck = ck + dk;
-          if (nci < 0 || nci >= gridCellsX || ncj < 0 || ncj >= gridCellsY ||
-              nck < 0 || nck >= gridCellsZ)
-            continue;
-
-          for (int q : cells[cellIdx(nci, ncj, nck)]) {
-            Point other = points[q];
-            double dist = std::sqrt(
-                std::pow(curr.i - other.i, 2) +
-                std::pow(curr.j - other.j, 2) +
-                std::pow(curr.k - other.k, 2));
-            if (dist <= eps) neighbors++;
+  auto expandCluster = [&](int point, int id) {
+    regionQuery(point, seeds);
+    if (static_cast<int>(seeds.size()) < minPts) {
+      clId[static_cast<std::size_t>(point)] = NOISE;
+      return false;
+    }
+    for (int s : seeds) {  // changeClIds(seeds, ClId), for points not yet in a cluster (see header)
+      int& c = clId[static_cast<std::size_t>(s)];
+      if (c == UNCLASSIFIED || c == NOISE) c = id;
+    }
+    seeds.erase(std::remove(seeds.begin(), seeds.end(), point), seeds.end());
+    for (std::size_t f = 0; f < seeds.size(); ++f) {  // seeds.first() ... seeds.delete(currentP)
+      regionQuery(seeds[f], res);
+      if (static_cast<int>(res.size()) >= minPts) {
+        for (int q : res) {
+          int& c = clId[static_cast<std::size_t>(q)];
+          if (c == UNCLASSIFIED || c == NOISE) {
+            if (c == UNCLASSIFIED) seeds.push_back(q);
+            c = id;
           }
         }
       }
     }
+    return true;
+  };
 
-    if (neighbors >= minPts) {
-      int clusterSize = 0;
-      stack.clear();
-      stack.push_back({curr.i, curr.j, curr.k, p});
+  int clusterId = 0;
+  for (int p = 0; p < nOcc; ++p)
+    if (clId[static_cast<std::size_t>(p)] == UNCLASSIFIED && expandCluster(p, clusterId)) ++clusterId;
 
-      while (!stack.empty()) {
-        StackElement s = stack.back();
-        stack.pop_back();
-
-        int pidx = s.is_skipping;  // We use is_skipping to store point index
-        if (pointVisited[pidx]) continue;
-
-        pointVisited[pidx] = 1;
-        clusterSize++;
-
-        std::size_t occIdx = idx3(points[pidx].i, points[pidx].j, points[pidx].k, ny, nz);
-        visited[occIdx] = 1;
-        result.visitedVoxels++;
-
-        // Expand cluster
-        int nci = points[pidx].i / cellSize;
-        int ncj = points[pidx].j / cellSize;
-        int nck = points[pidx].k / cellSize;
-
-        for (int di = -1; di <= 1; ++di) {
-          for (int dj = -1; dj <= 1; ++dj) {
-            for (int dk = -1; dk <= 1; ++dk) {
-              int nnci = nci + di, nncj = ncj + dj, nnck = nck + dk;
-              if (nnci < 0 || nnci >= gridCellsX || nncj < 0 || nncj >= gridCellsY ||
-                  nnck < 0 || nnck >= gridCellsZ)
-                continue;
-
-              for (int q : cells[cellIdx(nnci, nncj, nnck)]) {
-                if (pointVisited[q]) continue;
-                Point other = points[q];
-                double dist = std::sqrt(
-                    std::pow(points[pidx].i - other.i, 2) +
-                    std::pow(points[pidx].j - other.j, 2) +
-                    std::pow(points[pidx].k - other.k, 2));
-                if (dist <= eps) {
-                  stack.push_back({other.i, other.j, other.k, q});
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (clusterSize > 0) {
-        result.nclusters++;
-        result.clusterSizes.push_back(clusterSize);
-        result.maxCluster = std::max(result.maxCluster, clusterSize);
-      }
-    }
+  std::vector<int> sizes(static_cast<std::size_t>(clusterId), 0);
+  for (int p = 0; p < nOcc; ++p) {
+    const int c = clId[static_cast<std::size_t>(p)];
+    if (c < 0) continue;
+    ++sizes[static_cast<std::size_t>(c)];
+    visited[static_cast<std::size_t>(occVox[static_cast<std::size_t>(p)])] = 1;
+    result.visitedVoxels++;
   }
-
+  for (int s : sizes) {
+    if (s == 0) continue;
+    result.nclusters++;
+    result.clusterSizes.push_back(s);
+    result.maxCluster = std::max(result.maxCluster, s);
+  }
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult dbscan(int nx, int ny, int nz, double eps, int minPts,
+                     const std::vector<uint8_t>& occupancy, std::vector<uint8_t>& visited,
+                     bool periodic) {
+  return periodic ? dbscanImpl<true>(nx, ny, nz, eps, minPts, occupancy, visited)
+                  : dbscanImpl<false>(nx, ny, nz, eps, minPts, occupancy, visited);
 }
 
 // Hierarchical (Single-Linkage) clustering
