@@ -745,11 +745,19 @@ ClusterResult kmeans(
 
   std::vector<int> assignments(numPoints);
 
-  // Lloyd iterations, at most 10 (the campaign's cap, disclosed). Stops early at a fixed
-  // point: when no assignment changes, the centroids the next update would compute are
-  // the ones already in place, so every later iteration repeats this one -- the result is
-  // identical to running all 10, only the redundant work is skipped (KMEANS-2 hygiene, D11).
-  for (int iter = 0; iter < 10; ++iter) {
+  // Lloyd's iteration (Lloyd, IEEE TIT 28(2):129-137, 1982, Method I: "imposing conditions
+  // (14) and (17) alternately" -- centre of mass of each set, nearest-quantum partition --
+  // until the sequence converges), in 3-D. It stops at the fixed point: when no assignment
+  // changes, the next update would reproduce the current centroids. Audit 27.09.26: the
+  // campaign's fixed cap of 10 iterations is not in the source and is removed. Lloyd leaves
+  // the empty-set case to "appropriate modifications": an empty cluster keeps its centroid.
+  // Initial centroids at evenly spaced points of the raster-ordered list (Lloyd: arbitrary).
+  const int kMaxIterations = 1000000;  // guard only; convergence is finite for finite data
+  for (int iter = 0;; ++iter) {
+    if (iter == kMaxIterations) {
+      throw std::runtime_error("kmeans: Lloyd iteration did not converge in " +
+                               std::to_string(kMaxIterations) + " iterations");
+    }
     bool changed = (iter == 0);
     // Assign points to nearest centroid
     for (int p = 0; p < numPoints; ++p) {
@@ -812,7 +820,10 @@ ClusterResult kmeans(
   return result;
 }
 
-// GCBD (Grid-based Connectivity using Union-Find)
+// GCBD (Grid-based Connectivity using Union-Find) -- WITHDRAWN from the comparison (author,
+// 27.09.26): a plain 6-connected union-find CCL, identical in output to CC3D, and not the
+// density-based grid clustering of Du & Wu (Entropy 24:1606, 2022) it was attributed to.
+// Kept for the record and the exact-partition tests; not run in the campaigns.
 namespace {
 
 template <bool Periodic>
@@ -1517,34 +1528,33 @@ ClusterResult rleCCL(
 
 
 
-// ── RLE-CCL, optimized track ─────────────────────────────────────────────────
+// ── RLE-CCL, optimized track: He, Chao & Suzuki 2008 ─────────────────────────
 //
-// He, Chao, Suzuki & Wu, "A Run-Based Two-Scan Labeling Algorithm",
-// IEEE Trans. Image Processing 17(5), 2008 -- the paper the fair track already
-// cites but does not follow.
+// The run-based two-scan labeling algorithm as PUBLISHED: L. He, Y. Chao, K. Suzuki,
+// "A run-based two-scan labeling algorithm", IEEE Trans. Image Process. 17(5):749-756,
+// 2008, doi:10.1109/TIP.2008.919369, §II-III, generalised from 2-D rows to 3-D rows.
+// Audit 27.09.26: replaces a union-find over run ids with a second pass over the runs,
+// which is not the paper's method.
 //
-// Three things separate this from the fair track, all of them the point of RLE:
-//
-// 1. RUNS, not voxels, are the union-find domain. The fair track builds runs
-//    and then unions every voxel inside each run to the run's representative
-//    (Algorithms.cpp, rleCCL, "Extend existing run"), which is precisely the
-//    work run-length encoding exists to avoid: a run of length L costs L-1
-//    unions there and zero here. The union-find array is sized to the number of
-//    runs, which on E1-like data is a few thousand against 23.7M voxels.
-//
-// 2. Rows are iterated sparsely. The fair track's inner loop visits every k in
-//    [0,nz) for every (i,j) -- a full O(NX*NY*NZ) sweep -- and then sweeps the
-//    grid twice more to count. Here the row scan is the only pass over the
-//    occupancy array, and the counting pass walks the run table.
-//
-// 3. Adjacency between runs is resolved by the two-pointer merge of sorted run
-//    lists (as in the fair track) but applied to run ids, so a merge costs one
-//    union per overlapping PAIR rather than one per shared voxel.
-//
-// Output is identical to the fair track by construction: both compute the
-// 6-connected components of the same occupancy, and connectivity of a run to
-// its neighbours is unchanged by whether its interior was unioned voxel by
-// voxel.
+//   first scan    raster order. A run is a maximal block of occupied voxels along k in
+//                 row (i,j). Runs connected to the current run are those of the already
+//                 scanned neighbouring rows -- (i-1,j) and (i,j-1) in 3-D -- whose k-range
+//                 overlaps it (6-connectivity; the paper's 2-D case is 8-connectivity).
+//                 No connected run: a new provisional label l and a new provisional label
+//                 list, rtable[l] = l, next[l] = -1, tail[l] = l. Otherwise the run takes
+//                 the provisional label of the first connected run in scan order (the
+//                 paper's "upper left-most run") and resolve() merges the lists of every
+//                 other connected run into it. Every voxel of the run is written with its
+//                 provisional label (label image b).
+//   label lists   the paper's connection lists: rtable (representative = smallest label =
+//                 list head), next, tail. merge(u, v), u < v: every label of list v gets
+//                 rtable = u, next[tail[u]] = v, tail[u] = tail[v]. resolve(x, y): u =
+//                 rtable[x], v = rtable[y]; merge the larger into the smaller; nothing if
+//                 equal.
+//   second scan   over the whole image, b <- rtable[b].
+// The runs of the previous rows are kept per row (the paper keeps them in a start/end queue,
+// which serves the single previous row of 2-D). Label 0 is background. Under PBC xyz the
+// voxel pairs that wrap across a face are resolved after the first scan (addition).
 namespace {
 
 template <bool Periodic>
@@ -1561,122 +1571,97 @@ ClusterResult rleCCLOptimizedImpl(
   std::fill(visited.begin(), visited.end(), 0);
   initLabels(labels, totalSize);
 
-  // Run table. Sized to the number of runs, which is data-dependent.
-  struct Run { int i, j, kStart, kEnd; };
-  std::vector<Run> runs;
-  runs.reserve(1024);
+  std::vector<unsigned> b(totalSize, 0u);  // label image
+  // Provisional label lists (index 0 = background, rtable[0] = 0).
+  std::vector<unsigned> rtable{0u}, tail{0u};
+  std::vector<long long> next{-1};
 
-  // Union-find over RUN IDS.
-  std::vector<int> parent;
-  parent.reserve(1024);
-  auto find = [&parent](int x) {
-    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-    return x;
+  auto merge = [&](unsigned u, unsigned v) {  // u < v: list v into list u
+    for (long long i = v; i != -1; i = next[static_cast<std::size_t>(i)]) rtable[static_cast<std::size_t>(i)] = u;
+    next[tail[u]] = v;
+    tail[u] = tail[v];
   };
-  auto unite = [&](int a, int b) {
-    a = find(a); b = find(b);
-    if (a == b) return;
-    if (a < b) parent[b] = a; else parent[a] = b;
+  auto resolve = [&](unsigned x, unsigned y) {
+    const unsigned u = rtable[x], v = rtable[y];
+    if (u < v) merge(u, v);
+    else if (u > v) merge(v, u);
   };
 
-  // Run ids for the current and previous row within a slice, and for the whole
-  // previous slice. Runs in each list are ordered by kStart, which the scan
-  // produces for free and the two-pointer merge below relies on.
-  std::vector<std::vector<int>> prevSlice(ny), currSlice(ny);
+  struct Run { int kStart, kEnd; unsigned label; };
+  std::vector<std::vector<Run>> prevSlice(static_cast<std::size_t>(ny)), currSlice(static_cast<std::size_t>(ny));
+  std::vector<unsigned> connected;
 
-  // Two-pointer merge of two kStart-sorted run lists: one union per overlapping
-  // pair. Runs overlap when their k-ranges share at least one position.
-  auto mergeRuns = [&](const std::vector<int>& A, const std::vector<int>& B) {
-    std::size_t ai = 0, bi = 0;
-    while (ai < A.size() && bi < B.size()) {
-      const Run& ra = runs[static_cast<std::size_t>(A[ai])];
-      const Run& rb = runs[static_cast<std::size_t>(B[bi])];
-      if (ra.kEnd < rb.kStart) { ++ai; continue; }
-      if (rb.kEnd < ra.kStart) { ++bi; continue; }
-      unite(A[ai], B[bi]);
-      if (ra.kEnd <= rb.kEnd) ++ai; else ++bi;
-    }
-  };
-
+  // --- first scan ----------------------------------------------------------------------
   for (int i = 0; i < nx; ++i) {
     for (int j = 0; j < ny; ++j) {
-      currSlice[j].clear();
-
-      // The single pass over the occupancy array. Runs are emitted whole; no
-      // per-voxel union-find operation happens anywhere in this function.
+      auto& row = currSlice[static_cast<std::size_t>(j)];
+      row.clear();
       const std::size_t rowBase = idx3(i, j, 0, ny, nz);
-      int kStart = -1;
-      for (int k = 0; k <= nz; ++k) {
-        const bool occ = (k < nz) && (occupancy[rowBase + static_cast<std::size_t>(k)] == 1);
-        if (occ) {
-          if (kStart < 0) kStart = k;
-        } else if (kStart >= 0) {
-          const int id = static_cast<int>(runs.size());
-          runs.push_back(Run{i, j, kStart, k - 1});
-          parent.push_back(id);
-          currSlice[j].push_back(id);
-          kStart = -1;
+      int k = 0;
+      while (k < nz) {
+        if (occupancy[rowBase + static_cast<std::size_t>(k)] != 1) { ++k; continue; }
+        const int ks = k;
+        while (k < nz && occupancy[rowBase + static_cast<std::size_t>(k)] == 1) ++k;
+        const int ke = k - 1;
+        // Connected runs of the scanned neighbour rows, in scan order: (i-1,j) then (i,j-1).
+        connected.clear();
+        if (i > 0)
+          for (const Run& r : prevSlice[static_cast<std::size_t>(j)])
+            if (r.kEnd >= ks && r.kStart <= ke) connected.push_back(r.label);
+        if (j > 0)
+          for (const Run& r : currSlice[static_cast<std::size_t>(j - 1)])
+            if (r.kEnd >= ks && r.kStart <= ke) connected.push_back(r.label);
+        unsigned lab;
+        if (connected.empty()) {
+          lab = static_cast<unsigned>(rtable.size());
+          rtable.push_back(lab);
+          next.push_back(-1);
+          tail.push_back(lab);
+        } else {
+          lab = connected[0];
+          for (std::size_t t = 1; t < connected.size(); ++t) resolve(lab, connected[t]);
         }
+        for (int kk = ks; kk <= ke; ++kk) b[rowBase + static_cast<std::size_t>(kk)] = lab;
+        row.push_back(Run{ks, ke, lab});
       }
-
-      if (j > 0 && !currSlice[j - 1].empty()) mergeRuns(currSlice[j - 1], currSlice[j]);
-      if (i > 0 && !prevSlice[j].empty())     mergeRuns(prevSlice[j],     currSlice[j]);
     }
     std::swap(prevSlice, currSlice);
   }
 
   if constexpr (Periodic) {
-    // PBC xyz: runs that touch opposite faces are merged here, after the in-grid
-    // merges above. Runs were created in raster order, so each row's runs form a
-    // contiguous, kStart-ordered id range.
-    std::vector<int> rowStart(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) + 1, 0);
-    for (const Run& r : runs)
-      ++rowStart[static_cast<std::size_t>(r.i) * static_cast<std::size_t>(ny) +
-                 static_cast<std::size_t>(r.j) + 1];
-    for (std::size_t r = 1; r < rowStart.size(); ++r) rowStart[r] += rowStart[r - 1];
-    auto rowRuns = [&](int i, int j) {
-      const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(ny) +
-                              static_cast<std::size_t>(j);
-      std::vector<int> ids;
-      for (int id = rowStart[row]; id < rowStart[row + 1]; ++id) ids.push_back(id);
-      return ids;
-    };
-    for (std::size_t row = 0; row + 1 < rowStart.size(); ++row) {  // z faces, within a row
-      const int first = rowStart[row], last = rowStart[row + 1] - 1;
-      if (first <= last && runs[static_cast<std::size_t>(first)].kStart == 0 &&
-          runs[static_cast<std::size_t>(last)].kEnd == nz - 1) {
-        unite(first, last);
+    // Voxel pairs across a face (6-connectivity): x, y and z faces.
+    for (int j = 0; j < ny; ++j)
+      for (int k = 0; k < nz; ++k) {
+        const unsigned a = b[idx3(0, j, k, ny, nz)], c = b[idx3(nx - 1, j, k, ny, nz)];
+        if (a && c) resolve(a, c);
       }
-    }
-    for (int i = 0; i < nx; ++i) mergeRuns(rowRuns(i, 0), rowRuns(i, ny - 1));  // y faces
-    for (int j = 0; j < ny; ++j) mergeRuns(rowRuns(0, j), rowRuns(nx - 1, j));  // x faces
+    for (int i = 0; i < nx; ++i)
+      for (int k = 0; k < nz; ++k) {
+        const unsigned a = b[idx3(i, 0, k, ny, nz)], c = b[idx3(i, ny - 1, k, ny, nz)];
+        if (a && c) resolve(a, c);
+      }
+    for (int i = 0; i < nx; ++i)
+      for (int j = 0; j < ny; ++j) {
+        const unsigned a = b[idx3(i, j, 0, ny, nz)], c = b[idx3(i, j, nz - 1, ny, nz)];
+        if (a && c) resolve(a, c);
+      }
   }
 
-  // Tally over the RUN TABLE, not the grid. Dense ids are assigned in order of
-  // first appearance scanning runs in creation order, which is raster order, so
-  // this matches what the fair track's compactLabels() produces.
-  std::vector<int> finalId(runs.size(), -1);
+  // --- second scan: b <- rtable[b] over the whole image --------------------------------
+  // Output contract (dense ids, sizes) is tallied in the same pass: representatives are
+  // numbered in order of first appearance, as every method's labels are.
+  std::vector<int> dense(rtable.size(), -1);
   std::vector<int> sizes;
-  sizes.reserve(runs.size());
-
-  for (std::size_t r = 0; r < runs.size(); ++r) {
-    const int root = find(static_cast<int>(r));
-    int id = finalId[static_cast<std::size_t>(root)];
-    if (id < 0) {
-      id = static_cast<int>(sizes.size());
-      finalId[static_cast<std::size_t>(root)] = id;
-      sizes.push_back(0);
-    }
-    const Run& run = runs[r];
-    const int len = run.kEnd - run.kStart + 1;
-    sizes[static_cast<std::size_t>(id)] += len;
-    const std::size_t base = idx3(run.i, run.j, 0, ny, nz);
-    for (int k = run.kStart; k <= run.kEnd; ++k) {
-      const std::size_t idx = base + static_cast<std::size_t>(k);
-      if (labels) (*labels)[idx] = id;
-      visited[idx] = 1;
-    }
-    result.visitedVoxels += static_cast<std::size_t>(len);
+  for (std::size_t e = 0; e < totalSize; ++e) {
+    if (b[e] == 0u) continue;
+    const unsigned rep = rtable[b[e]];
+    b[e] = rep;
+    int& id = dense[rep];
+    if (id < 0) { id = static_cast<int>(sizes.size()); sizes.push_back(0); }
+    ++sizes[static_cast<std::size_t>(id)];
+    if (labels) (*labels)[e] = id;
+    visited[e] = 1;
+    result.visitedVoxels++;
   }
 
   result.nclusters = static_cast<int>(sizes.size());
@@ -1684,7 +1669,6 @@ ClusterResult rleCCLOptimizedImpl(
     result.clusterSizes.push_back(sz);
     result.maxCluster = std::max(result.maxCluster, sz);
   }
-
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;

@@ -14,7 +14,7 @@ enum class ClusterAlgorithm {
   DBSCAN,        // Density-based clustering
   Hierarchical,  // Single-linkage hierarchical
   KMeans,        // K-means clustering
-  GCBD,          // Union-Find based clustering
+  GCBD,          // union-find CCL; WITHDRAWN from the comparison (author 27.09.26): not Du & Wu's GCBD
   HDBSCAN,       // Hierarchical DBSCAN
   CC3D,          // Connected Components 3D (fair: basic Union-Find)
   // Dual-track pairs. Each <X> is the textbook-fair variant held to the same
@@ -22,7 +22,7 @@ enum class ClusterAlgorithm {
   // actually published and deployed. Both tracks are reported.
   CC3DOptimized, // CC3D as SAUF (Wu, Otoo, Shoshani 2005; Wu, Otoo, Suzuki 2009)
   RLECCL,        // Run-Length Encoding CCL (textbook: per-voxel union-find)
-  RLECCLOptimized,  // RLE-CCL with runs, not voxels, as the union-find domain
+  RLECCLOptimized,  // RLE-CCL as published (He, Chao, Suzuki 2008)
   VCCS,          // Voxel Cloud Connected Segmentation (textbook: uniform seeds)
   VCCSOptimized  // VCCS as published (Papon et al., CVPR 2013)
 };
@@ -162,7 +162,10 @@ ClusterResult kmeans(
     std::vector<uint8_t>& visited);
 
 
-// GCBD (Grid-based Connectivity using Union-Find)
+// GCBD (Grid-based Connectivity using Union-Find) -- WITHDRAWN from the comparison (author,
+// 27.09.26): a plain 6-connected union-find CCL, identical in output to CC3D, and not the
+// density-based grid clustering of Du & Wu (Entropy 24:1606, 2022) it was attributed to.
+// Kept for the record and the exact-partition tests; not run in the campaigns.
 ClusterResult gcbd(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
@@ -207,9 +210,10 @@ ClusterResult rleCCL(
     std::vector<uint8_t>& visited,
     std::vector<int>* labels = nullptr);
 
-// RLE-CCL Optimized - He et al., "A Run-Based Two-Scan Labeling Algorithm",
-// IEEE Trans. Image Processing 17(5), 2008. Runs, not voxels, are the
-// union-find domain; rows are iterated sparsely; no array is sized to the grid.
+// RLE-CCL Optimized - He, Chao & Suzuki, "A run-based two-scan labeling algorithm",
+// IEEE Trans. Image Process. 17(5):749-756, 2008, as published, in 3-D: first scan
+// labelling runs with provisional label lists (rtable, next, tail), second scan over the
+// whole label image. See the definition.
 ClusterResult rleCCLOptimized(
     int nx, int ny, int nz,
     const std::vector<uint8_t>& occupancy,
