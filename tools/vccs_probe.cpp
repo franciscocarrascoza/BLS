@@ -25,6 +25,7 @@
 #include "cluster/Algorithms.hpp"
 #include "config/Parser.hpp"
 #include "grid/Grid.hpp"
+#include "grid/GridSpec.hpp"
 #include "io/TrajectoryReader.hpp"
 
 using namespace bls;
@@ -57,44 +58,18 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Same box handling as main.cpp's comparison path: BOX AUTO fits the
-  // coordinates, with the same padding, so the grid matches the campaign's.
-  Mat3 box = frame.box;
-  Vec3 origin{0.0, 0.0, 0.0};
-  auto len = [](const Vec3& v) { return norm(v); };
-  bool needFit = len(box.column(0)) < 1e-8 || len(box.column(1)) < 1e-8 ||
-                 len(box.column(2)) < 1e-8;
-  if (!needFit && config.boxMode == BoxMode::Auto && !frame.xyz.empty()) {
-    Vec3 mn = frame.xyz[0], mx = frame.xyz[0];
-    for (const auto& p : frame.xyz) {
-      mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
-      mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
-    }
-    const double ex = mx.x - mn.x, ey = mx.y - mn.y, ez = mx.z - mn.z;
-    if (len(box.column(0)) > ex * 10.0 || len(box.column(1)) > ey * 10.0 ||
-        len(box.column(2)) > ez * 10.0)
-      needFit = true;
+  // The grid of the shared builder, exactly as bls_analyze builds it for every method
+  // (audit 27.09.26, finding HB-1: this tool used to fit its own BOX AUTO box, ignoring
+  // BOX MANUAL / BOX CELL and the RAM guard; under BOX AUTO the two rules agree).
+  GridSpec spec;
+  if (!deriveGridSpec(config, frame, nullptr, spec, err)) {
+    std::fprintf(stderr, "grid: %s\n", err.c_str());
+    return 1;
   }
-  if (needFit && !frame.xyz.empty()) {
-    Vec3 mn = frame.xyz[0], mx = frame.xyz[0];
-    for (const auto& p : frame.xyz) {
-      mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
-      mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
-    }
-    const double pad = config.gridSpacing * 2.0;
-    origin = mn;
-    box = Mat3{Vec3{std::max(mx.x - mn.x + pad, pad), 0, 0},
-               Vec3{0, std::max(mx.y - mn.y + pad, pad), 0},
-               Vec3{0, 0, std::max(mx.z - mn.z + pad, pad)}};
-  }
-
-  const int nx = std::max(1, (int)std::ceil(norm(box.column(0)) / config.gridSpacing));
-  const int ny = std::max(1, (int)std::ceil(norm(box.column(1)) / config.gridSpacing));
-  const int nz = std::max(1, (int)std::ceil(norm(box.column(2)) / config.gridSpacing));
-
+  const int nx = spec.nx, ny = spec.ny, nz = spec.nz;
+  const bool periodic = spec.pbc.all();
   Grid grid;
-  grid.configure(nx, ny, nz, config.gridSpacing, box, origin,
-                 periodicityFor(config.pbc));
+  configureGrid(grid, spec);
   grid.rasterize(frame.xyz, nullptr, config.cutoff, config.occupancy);
 
   std::size_t occ = 0;
@@ -104,12 +79,15 @@ int main(int argc, char** argv) {
   params.nx = nx; params.ny = ny; params.nz = nz;
   params.eps = seedRes;
   params.connectivity = config.connectivity;
-  params.periodic = config.pbc.all();  // deck PBC xyz: same periodicity as the grid and as BLS
+  params.periodic = periodic;  // deck PBC xyz: same periodicity as the grid and as BLS
 
   ClusterResult dfs = runClusterAlgorithm(ClusterAlgorithm::TraditionalDFS, params,
                                           grid.occupancy(), grid.visited());
-  ClusterResult fair = runClusterAlgorithm(ClusterAlgorithm::VCCS, params,
-                                           grid.occupancy(), grid.visited());
+  // The textbook (fair) track has no periodic form and refuses PBC xyz; it is withdrawn
+  // (D16) and reported only under PBC none.
+  ClusterResult fair;
+  if (!periodic)
+    fair = runClusterAlgorithm(ClusterAlgorithm::VCCS, params, grid.occupancy(), grid.visited());
   ClusterResult opt = runClusterAlgorithm(ClusterAlgorithm::VCCSOptimized, params,
                                           grid.occupancy(), grid.visited());
 
@@ -117,10 +95,13 @@ int main(int argc, char** argv) {
               nx, ny, nz, (std::size_t)nx * ny * nz, occ, seedRes);
   std::printf("dfs        nclusters %7d  max_cluster %7d  visited %8zu\n",
               dfs.nclusters, dfs.maxCluster, dfs.visitedVoxels);
-  std::printf("fair       nclusters %7d  max_cluster %7d  visited %8zu  "
-              "candidates %8d  seeds %7d  prune_min %.4g\n",
-              fair.nclusters, fair.maxCluster, fair.visitedVoxels,
-              fair.seedCandidates, fair.seedsPlaced, fair.seedPruneThreshold);
+  if (periodic)
+    std::printf("fair       n/a (textbook track: no periodic form, withdrawn)\n");
+  else
+    std::printf("fair       nclusters %7d  max_cluster %7d  visited %8zu  "
+                "candidates %8d  seeds %7d  prune_min %.4g\n",
+                fair.nclusters, fair.maxCluster, fair.visitedVoxels,
+                fair.seedCandidates, fair.seedsPlaced, fair.seedPruneThreshold);
   std::printf("optimized  nclusters %7d  max_cluster %7d  visited %8zu  "
               "candidates %8d  seeds %7d  prune_min %.4g\n",
               opt.nclusters, opt.maxCluster, opt.visitedVoxels,
