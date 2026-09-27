@@ -186,20 +186,22 @@ int main() {
     check(result26.nclusters == 1, "CC3D with 26-connectivity should find 1 cluster");
   }
 
-  // HDBSCAN basic functionality test.
+  // HDBSCAN* basic functionality test (Campello et al. 2013: the root is never selected, so a
+  // lone blob is noise; two separated blobs are two clusters). Audit 27.09.26.
   {
-    std::vector<uint8_t> occupancy(27, 0);
-    std::vector<uint8_t> visited(27, 0);
-    // Create a small cluster in the center
-    occupancy[gridIndex(1, 1, 1, 3, 3)] = 1;
-    occupancy[gridIndex(1, 1, 0, 3, 3)] = 1;
-    occupancy[gridIndex(1, 1, 2, 3, 3)] = 1;
-    occupancy[gridIndex(1, 0, 1, 3, 3)] = 1;
-    occupancy[gridIndex(1, 2, 1, 3, 3)] = 1;
+    std::vector<uint8_t> occupancy(9 * 3 * 3, 0);
+    std::vector<uint8_t> visited(occupancy.size(), 0);
+    for (int x0 : {1, 7}) {  // two "plus" shapes, six voxels apart along x
+      occupancy[gridIndex(x0, 1, 1, 3, 3)] = 1;
+      occupancy[gridIndex(x0, 1, 0, 3, 3)] = 1;
+      occupancy[gridIndex(x0, 1, 2, 3, 3)] = 1;
+      occupancy[gridIndex(x0, 0, 1, 3, 3)] = 1;
+      occupancy[gridIndex(x0, 2, 1, 3, 3)] = 1;
+    }
 
-    bls::ClusterResult result = bls::hdbscan(3, 3, 3, 2, 2, occupancy, visited);
-    check(result.nclusters >= 1, "HDBSCAN should find at least 1 cluster");
-    check(result.visitedVoxels > 0, "HDBSCAN should visit some voxels");
+    bls::ClusterResult result = bls::hdbscan(9, 3, 3, 2, 2, occupancy, visited);
+    check(result.nclusters == 2, "HDBSCAN* should find the 2 separated blobs");
+    check(result.visitedVoxels == 10, "HDBSCAN* should assign all 10 voxels");
   }
 
   // Algorithm comparison test (GCBD vs CC3D should match with same connectivity).

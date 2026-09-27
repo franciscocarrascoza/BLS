@@ -175,12 +175,16 @@ ClusterResult gcbd(
     std::vector<int>* labels = nullptr,
     bool periodic = false);
 
-// HDBSCAN (Hierarchical Density-Based Spatial Clustering)
+// HDBSCAN* as published: Campello, Moulavi & Sander, PAKDD 2013 (Algorithms 1-3, Eq. 3):
+// core distances, mutual-reachability MST by Prim (O(n) memory), simultaneous removal of tied
+// edges, m_clSize = minClusterSize, excess-of-mass selection with the root excluded. m_pts =
+// minSamples >= 2. Noise is not counted. See the definition.
 ClusterResult hdbscan(
     int nx, int ny, int nz,
     int minClusterSize, int minSamples,
     const std::vector<uint8_t>& occupancy,
-    std::vector<uint8_t>& visited);
+    std::vector<uint8_t>& visited,
+    bool periodic = false);
 
 // CC3D (Connected Components 3D) - Fair basic implementation
 // Uses basic Union-Find WITHOUT path compression or union-by-rank

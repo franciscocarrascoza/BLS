@@ -7,6 +7,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -155,9 +156,10 @@ bool supportsPeriodic(ClusterAlgorithm algo) {
     case ClusterAlgorithm::RLECCLOptimized:
     case ClusterAlgorithm::VCCSOptimized:
     case ClusterAlgorithm::DBSCAN:  // Ester et al. 1996 with minimum-image distances
+    case ClusterAlgorithm::HDBSCAN: // HDBSCAN* (Campello et al. 2013) with minimum-image distances
       return true;
     default:
-      // Withdrawn textbook tracks (cc3d, rle_ccl, vccs), HDBSCAN (until HDBSCAN* is in),
+      // Withdrawn textbook tracks (cc3d, rle_ccl, vccs),
       // k-means (declared non-periodic, D11), hierarchical (SI only).
       return false;
   }
@@ -202,7 +204,8 @@ ClusterResult runClusterAlgorithm(
     case ClusterAlgorithm::GCBD:
       return gcbd(params.nx, params.ny, params.nz, occupancy, visited, labels, params.periodic);
     case ClusterAlgorithm::HDBSCAN:
-      return hdbscan(params.nx, params.ny, params.nz, params.minClusterSize, params.minSamples, occupancy, visited);
+      return hdbscan(params.nx, params.ny, params.nz, params.minClusterSize, params.minSamples,
+                     occupancy, visited, params.periodic);
     case ClusterAlgorithm::CC3D:
       return cc3d(params.nx, params.ny, params.nz, params.connectivity, occupancy, visited, labels);
     case ClusterAlgorithm::CC3DOptimized:
@@ -951,9 +954,42 @@ ClusterResult gcbd(int nx, int ny, int nz, const std::vector<uint8_t>& occupancy
                   : gcbdImpl<false>(nx, ny, nz, occupancy, visited, labels);
 }
 
-// HDBSCAN (Hierarchical Density-Based Spatial Clustering)
-// Simplified implementation for fair benchmarking
-ClusterResult hdbscan(
+namespace {
+
+// ── HDBSCAN* ──────────────────────────────────────────────────────────────────
+//
+// As PUBLISHED: R.J.G.B. Campello, D. Moulavi, J. Sander, "Density-based clustering based on
+// hierarchical density estimates", PAKDD 2013, LNCS 7819:160-172,
+// doi:10.1007/978-3-642-37456-2_14. Audit 27.09.26 (decision D4/D5 revised): replaces a
+// global cut at 1.5 x the median of an explicit N^2 edge list (finding S1-9), which was not
+// HDBSCAN* and needed 16*N^2/2 bytes.
+//
+//   Definition 5  core distance d_core(x): distance to the m_pts-nearest neighbour, x
+//                 included (m_pts = minSamples).
+//   Definition 7  d_mreach(p, q) = max{d_core(p), d_core(q), d(p, q)}.
+//   Algorithm 1   (2) an MST of the complete mutual-reachability graph, by "Prim's algorithm
+//                 based on an ordinary list search (instead of a heap)" -- O(n^2) time, O(n)
+//                 memory, no edge list; (3) extended with a self edge per object weighted by
+//                 its core distance; (4) edges removed in decreasing order of weight, "in case
+//                 of ties, edges must be removed simultaneously".
+//   Algorithm 2   with m_clSize (= minClusterSize): after each removal every affected cluster
+//                 is relabelled by its connected subcomponents; a subcomponent is spurious if
+//                 it has fewer than m_clSize objects (or, for m_clSize = 1, no edge); all
+//                 spurious -> the cluster disappears; one not spurious -> it shrinks, keeping
+//                 its label; two or more -> a true split into new clusters.
+//   Eq. (3)       S(C) = sum over x in C of (1/eps_min(x, C) - 1/eps_max(C)), eps_max(C) the
+//                 level at which C appears (infinity for the root), eps_min(x, C) the level
+//                 at which x leaves C (becomes noise, or C splits or disappears).
+//   Algorithm 3   optimal flat selection over all clusters EXCEPT the root: bottom-up,
+//                 S_hat(C) = S(C) for a leaf, else max{S(C), sum of the children's S_hat},
+//                 keeping C when S(C) >= that sum; then the shallowest kept cluster per branch.
+// A selected cluster's objects are those it held when it appeared; all other objects are
+// noise and are not counted. Distances are Euclidean between voxel centres in voxel units,
+// handled as exact integer squares so that ties are exact (they are frequent on a grid).
+// m_pts must be >= 2 (with m_pts = 1 every core distance is 0 and every stability infinite).
+// Under PBC xyz distances are minimum-image.
+template <bool Periodic>
+ClusterResult hdbscanImpl(
     int nx, int ny, int nz,
     int minClusterSize, int minSamples,
     const std::vector<uint8_t>& occupancy,
@@ -962,156 +998,254 @@ ClusterResult hdbscan(
   ScopedTimer timer;
   ClusterResult result;
 
+  if (minSamples < 2 || minClusterSize < 1) {
+    throw std::invalid_argument("hdbscan: needs minSamples (m_pts) >= 2 and minClusterSize >= 1");
+  }
+  const std::size_t totalSize = static_cast<std::size_t>(nx) * ny * nz;
   std::fill(visited.begin(), visited.end(), 0);
 
-  // Collect occupied points
-  std::vector<Point> points;
-  for (int i = 0; i < nx; ++i) {
-    for (int j = 0; j < ny; ++j) {
-      for (int k = 0; k < nz; ++k) {
-        std::size_t idx = idx3(i, j, k, ny, nz);
-        if (occupancy[idx] == 1) {
-          points.push_back({i, j, k});
+  std::vector<int> occVox;
+  for (std::size_t i = 0; i < totalSize; ++i)
+    if (occupancy[i] == 1) occVox.push_back(static_cast<int>(i));
+  const int n = static_cast<int>(occVox.size());
+  if (n < minSamples) {  // no object has an m_pts-nearest neighbour: everything is noise
+    result.elapsedMs = timer.elapsedMilliseconds();
+    return result;
+  }
+  const int planeYZ = ny * nz;
+  std::vector<int> px(static_cast<std::size_t>(n)), py(static_cast<std::size_t>(n)), pz(static_cast<std::size_t>(n));
+  for (int c = 0; c < n; ++c) {
+    const int v = occVox[static_cast<std::size_t>(c)];
+    px[static_cast<std::size_t>(c)] = v / planeYZ;
+    py[static_cast<std::size_t>(c)] = (v % planeYZ) / nz;
+    pz[static_cast<std::size_t>(c)] = v % nz;
+  }
+  auto axis = [](int d, int len) {
+    if constexpr (Periodic) {
+      d = ((d % len) + len) % len;
+      return std::min(d, len - d);
+    } else {
+      return d < 0 ? -d : d;
+    }
+  };
+  auto dist2 = [&](int a, int b) -> long long {
+    const long long dx = axis(px[static_cast<std::size_t>(a)] - px[static_cast<std::size_t>(b)], nx);
+    const long long dy = axis(py[static_cast<std::size_t>(a)] - py[static_cast<std::size_t>(b)], ny);
+    const long long dz = axis(pz[static_cast<std::size_t>(a)] - pz[static_cast<std::size_t>(b)], nz);
+    return dx * dx + dy * dy + dz * dz;
+  };
+
+  // --- Definition 5: core distances (squared), by Chebyshev shells of growing radius s. After
+  // shell s every occupied voxel within Chebyshev (min-image) distance s has been seen, and any
+  // other lies farther than s, so the m-th smallest seen value is exact once it is <= s^2.
+  std::vector<long long> core2(static_cast<std::size_t>(n));
+  {
+    const int maxShell = Periodic ? std::max({nx, ny, nz}) / 2 + 1 : std::max({nx, ny, nz});
+    std::vector<long long> seen;
+    std::vector<int> seenVox;
+    for (int c = 0; c < n; ++c) {
+      seen.clear();
+      seenVox.clear();
+      const int x = px[static_cast<std::size_t>(c)], y = py[static_cast<std::size_t>(c)], z = pz[static_cast<std::size_t>(c)];
+      long long kth = std::numeric_limits<long long>::max();
+      for (int s = 0; s <= maxShell; ++s) {
+        for (int di = -s; di <= s; ++di)
+          for (int dj = -s; dj <= s; ++dj)
+            for (int dk = -s; dk <= s; ++dk) {
+              if (std::max({std::abs(di), std::abs(dj), std::abs(dk)}) != s) continue;
+              int a = x + di, b = y + dj, d = z + dk;
+              if constexpr (Periodic) {
+                a = ((a % nx) + nx) % nx;
+                b = ((b % ny) + ny) % ny;
+                d = ((d % nz) + nz) % nz;
+              } else {
+                if (a < 0 || a >= nx || b < 0 || b >= ny || d < 0 || d >= nz) continue;
+              }
+              const int w = static_cast<int>(idx3(a, b, d, ny, nz));
+              if (occupancy[static_cast<std::size_t>(w)] != 1) continue;
+              if constexpr (Periodic) {  // a wrapped offset can revisit a voxel in a small cell
+                if (std::find(seenVox.begin(), seenVox.end(), w) != seenVox.end()) continue;
+                seenVox.push_back(w);
+              }
+              const long long dx = axis(a - x, nx), dy = axis(b - y, ny), dz = axis(d - z, nz);
+              seen.push_back(dx * dx + dy * dy + dz * dz);
+            }
+        if (static_cast<int>(seen.size()) >= minSamples) {
+          std::nth_element(seen.begin(), seen.begin() + (minSamples - 1), seen.end());
+          kth = seen[static_cast<std::size_t>(minSamples - 1)];
+          if (kth <= static_cast<long long>(s) * s) break;
+        }
+      }
+      core2[static_cast<std::size_t>(c)] = kth;
+    }
+  }
+
+  // --- Algorithm 1 step 2: MST of the mutual-reachability graph, Prim with a list search.
+  struct TreeEdge { int u, v; long long w; };
+  std::vector<TreeEdge> mst;
+  mst.reserve(static_cast<std::size_t>(n) - 1);
+  {
+    std::vector<long long> key(static_cast<std::size_t>(n), std::numeric_limits<long long>::max());
+    std::vector<int> from(static_cast<std::size_t>(n), -1);
+    std::vector<char> inTree(static_cast<std::size_t>(n), 0);
+    int u = 0;
+    for (int added = 0; added < n; ++added) {
+      inTree[static_cast<std::size_t>(u)] = 1;
+      if (from[static_cast<std::size_t>(u)] >= 0) mst.push_back({from[static_cast<std::size_t>(u)], u, key[static_cast<std::size_t>(u)]});
+      int next = -1;
+      long long best = std::numeric_limits<long long>::max();
+      const long long cu = core2[static_cast<std::size_t>(u)];
+      for (int v = 0; v < n; ++v) {
+        if (inTree[static_cast<std::size_t>(v)]) continue;
+        const long long w = std::max({cu, core2[static_cast<std::size_t>(v)], dist2(u, v)});
+        if (w < key[static_cast<std::size_t>(v)]) { key[static_cast<std::size_t>(v)] = w; from[static_cast<std::size_t>(v)] = u; }
+        if (key[static_cast<std::size_t>(v)] < best) { best = key[static_cast<std::size_t>(v)]; next = v; }
+      }
+      if (next < 0) break;
+      u = next;
+    }
+  }
+
+  // --- Algorithm 1 steps 3-4 with Algorithm 2: top-down removal of MST_ext edges by level.
+  std::vector<std::vector<std::pair<int, long long>>> adj(static_cast<std::size_t>(n));
+  for (const auto& e : mst) {
+    adj[static_cast<std::size_t>(e.u)].push_back({e.v, e.w});
+    adj[static_cast<std::size_t>(e.v)].push_back({e.u, e.w});
+  }
+  std::vector<long long> levels;
+  levels.reserve(mst.size() + static_cast<std::size_t>(n));
+  for (const auto& e : mst) levels.push_back(e.w);
+  for (long long c2 : core2) levels.push_back(c2);
+  std::sort(levels.begin(), levels.end(), std::greater<long long>());
+  levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
+  std::vector<int> edgeOrder(mst.size()), vertexOrder(static_cast<std::size_t>(n));
+  std::iota(edgeOrder.begin(), edgeOrder.end(), 0);
+  std::iota(vertexOrder.begin(), vertexOrder.end(), 0);
+  std::sort(edgeOrder.begin(), edgeOrder.end(), [&](int a, int b) { return mst[static_cast<std::size_t>(a)].w > mst[static_cast<std::size_t>(b)].w; });
+  std::sort(vertexOrder.begin(), vertexOrder.end(), [&](int a, int b) { return core2[static_cast<std::size_t>(a)] > core2[static_cast<std::size_t>(b)]; });
+
+  struct Cluster {
+    int parent;
+    double lambdaBirth;  // 1 / eps_max(C); 0 for the root
+    double stability{0.0};
+    std::vector<int> children;
+    std::vector<int> birthMembers;
+  };
+  std::vector<Cluster> cl;
+  std::vector<std::vector<int>> members;  // current members of each cluster
+  std::vector<int> clusterOf(static_cast<std::size_t>(n), 0);
+  cl.push_back({-1, 0.0, 0.0, {}, {}});
+  members.emplace_back(static_cast<std::size_t>(n));
+  std::iota(members[0].begin(), members[0].end(), 0);
+
+  std::vector<int> comp(static_cast<std::size_t>(n), -1), stack, affected;
+  std::size_t ei = 0, vi = 0;
+  for (const long long w : levels) {
+    const double lambda = 1.0 / std::sqrt(static_cast<double>(w));
+    affected.clear();
+    for (; ei < edgeOrder.size() && mst[static_cast<std::size_t>(edgeOrder[ei])].w == w; ++ei) {
+      const int c = clusterOf[static_cast<std::size_t>(mst[static_cast<std::size_t>(edgeOrder[ei])].u)];
+      if (c >= 0) affected.push_back(c);
+    }
+    for (; vi < vertexOrder.size() && core2[static_cast<std::size_t>(vertexOrder[vi])] == w; ++vi) {
+      const int c = clusterOf[static_cast<std::size_t>(vertexOrder[vi])];
+      if (c >= 0) affected.push_back(c);
+    }
+    std::sort(affected.begin(), affected.end());
+    affected.erase(std::unique(affected.begin(), affected.end()), affected.end());
+    for (const int c : affected) {
+      // Subcomponents of cluster c under the remaining edges (weight < w).
+      std::vector<std::vector<int>> subs;
+      for (const int v : members[static_cast<std::size_t>(c)]) comp[static_cast<std::size_t>(v)] = -1;
+      for (const int v0 : members[static_cast<std::size_t>(c)]) {
+        if (comp[static_cast<std::size_t>(v0)] >= 0) continue;
+        const int id = static_cast<int>(subs.size());
+        subs.emplace_back();
+        stack.assign(1, v0);
+        comp[static_cast<std::size_t>(v0)] = id;
+        while (!stack.empty()) {
+          const int v = stack.back();
+          stack.pop_back();
+          subs.back().push_back(v);
+          for (const auto& [q, ew] : adj[static_cast<std::size_t>(v)]) {
+            if (ew >= w || clusterOf[static_cast<std::size_t>(q)] != c || comp[static_cast<std::size_t>(q)] >= 0) continue;
+            comp[static_cast<std::size_t>(q)] = id;
+            stack.push_back(q);
+          }
+        }
+      }
+      std::vector<int> keep;
+      for (int s = 0; s < static_cast<int>(subs.size()); ++s) {
+        const auto& sub = subs[static_cast<std::size_t>(s)];
+        const bool hasEdge = sub.size() >= 2 || core2[static_cast<std::size_t>(sub[0])] < w;
+        const bool spurious = static_cast<int>(sub.size()) < minClusterSize || (minClusterSize == 1 && !hasEdge);
+        if (!spurious) keep.push_back(s);
+      }
+      Cluster& C = cl[static_cast<std::size_t>(c)];
+      const double gain = lambda - C.lambdaBirth;  // 1/eps_min - 1/eps_max for an object leaving now
+      if (keep.size() == 1) {                        // shrink: spurious parts leave as noise
+        std::vector<int> stay = subs[static_cast<std::size_t>(keep[0])];
+        const std::size_t left = members[static_cast<std::size_t>(c)].size() - stay.size();
+        cl[static_cast<std::size_t>(c)].stability += static_cast<double>(left) * gain;
+        for (const int v : members[static_cast<std::size_t>(c)]) clusterOf[static_cast<std::size_t>(v)] = -1;
+        for (const int v : stay) clusterOf[static_cast<std::size_t>(v)] = c;
+        members[static_cast<std::size_t>(c)].swap(stay);
+      } else {                                        // disappears (0) or true split (>= 2)
+        cl[static_cast<std::size_t>(c)].stability += static_cast<double>(members[static_cast<std::size_t>(c)].size()) * gain;
+        for (const int v : members[static_cast<std::size_t>(c)]) clusterOf[static_cast<std::size_t>(v)] = -1;
+        members[static_cast<std::size_t>(c)].clear();
+        for (const int s : keep) {
+          const int id = static_cast<int>(cl.size());
+          cl.push_back({c, lambda, 0.0, {}, subs[static_cast<std::size_t>(s)]});
+          cl[static_cast<std::size_t>(c)].children.push_back(id);
+          for (const int v : subs[static_cast<std::size_t>(s)]) clusterOf[static_cast<std::size_t>(v)] = id;
+          members.push_back(subs[static_cast<std::size_t>(s)]);
         }
       }
     }
   }
 
-  int numPoints = static_cast<int>(points.size());
-  if (numPoints == 0) {
-    result.elapsedMs = timer.elapsedMilliseconds();
-    return result;
+  // --- Algorithm 3: optimal flat selection, root excluded.
+  const int nc = static_cast<int>(cl.size());
+  std::vector<double> sHat(static_cast<std::size_t>(nc), 0.0);
+  std::vector<char> keepC(static_cast<std::size_t>(nc), 0);
+  for (int c = nc - 1; c >= 1; --c) {  // children are created after their parents
+    const Cluster& C = cl[static_cast<std::size_t>(c)];
+    if (C.children.empty()) { sHat[static_cast<std::size_t>(c)] = C.stability; keepC[static_cast<std::size_t>(c)] = 1; continue; }
+    double sum = 0.0;
+    for (const int ch : C.children) sum += sHat[static_cast<std::size_t>(ch)];
+    if (C.stability < sum) { sHat[static_cast<std::size_t>(c)] = sum; keepC[static_cast<std::size_t>(c)] = 0; }
+    else { sHat[static_cast<std::size_t>(c)] = C.stability; keepC[static_cast<std::size_t>(c)] = 1; }
+  }
+  std::vector<int> selected, todo(cl[0].children.rbegin(), cl[0].children.rend());
+  while (!todo.empty()) {
+    const int c = todo.back();
+    todo.pop_back();
+    if (keepC[static_cast<std::size_t>(c)]) { selected.push_back(c); continue; }
+    for (auto it = cl[static_cast<std::size_t>(c)].children.rbegin(); it != cl[static_cast<std::size_t>(c)].children.rend(); ++it) todo.push_back(*it);
   }
 
-  // Compute core distances (distance to minSamples-th nearest neighbor)
-  std::vector<double> coreDistances(numPoints);
-  for (int p = 0; p < numPoints; ++p) {
-    std::vector<double> distances;
-    distances.reserve(numPoints);
-
-    for (int q = 0; q < numPoints; ++q) {
-      if (p == q) continue;
-      double dist = std::sqrt(
-          std::pow(points[p].i - points[q].i, 2) +
-          std::pow(points[p].j - points[q].j, 2) +
-          std::pow(points[p].k - points[q].k, 2));
-      distances.push_back(dist);
-    }
-
-    std::sort(distances.begin(), distances.end());
-    int kIdx = std::min(minSamples - 1, static_cast<int>(distances.size()) - 1);
-    coreDistances[p] = kIdx >= 0 ? distances[kIdx] : 0.0;
+  for (const int c : selected) {
+    const auto& mem = cl[static_cast<std::size_t>(c)].birthMembers;
+    const int sz = static_cast<int>(mem.size());
+    for (const int v : mem) visited[static_cast<std::size_t>(occVox[static_cast<std::size_t>(v)])] = 1;
+    result.visitedVoxels += static_cast<std::size_t>(sz);
+    result.nclusters++;
+    result.clusterSizes.push_back(sz);
+    result.maxCluster = std::max(result.maxCluster, sz);
   }
-
-  // Build mutual reachability distance graph using Union-Find
-  // Mutual reachability = max(core_dist(a), core_dist(b), dist(a,b))
-  struct Edge {
-    int p1, p2;
-    double weight;
-    bool operator<(const Edge& other) const { return weight < other.weight; }
-  };
-
-  std::vector<Edge> edges;
-  edges.reserve(numPoints * numPoints / 2);
-
-  for (int p = 0; p < numPoints; ++p) {
-    for (int q = p + 1; q < numPoints; ++q) {
-      double dist = std::sqrt(
-          std::pow(points[p].i - points[q].i, 2) +
-          std::pow(points[p].j - points[q].j, 2) +
-          std::pow(points[p].k - points[q].k, 2));
-      double mutualReach = std::max({coreDistances[p], coreDistances[q], dist});
-      edges.push_back({p, q, mutualReach});
-    }
-  }
-
-  // Sort edges by mutual reachability distance
-  std::sort(edges.begin(), edges.end());
-
-  // Build minimum spanning tree using Kruskal's algorithm with Union-Find
-  std::vector<UnionFind> uf(numPoints);
-  for (int i = 0; i < numPoints; ++i) {
-    uf[i].parent = i;
-    uf[i].rank = 0;
-  }
-
-  auto find = [&](int x) {
-    while (uf[x].parent != x) {
-      uf[x].parent = uf[uf[x].parent].parent;
-      x = uf[x].parent;
-    }
-    return x;
-  };
-
-  auto unite = [&](int x, int y) -> bool {
-    int rootX = find(x);
-    int rootY = find(y);
-    if (rootX == rootY) return false;
-
-    if (uf[rootX].rank < uf[rootY].rank) {
-      uf[rootX].parent = rootY;
-    } else if (uf[rootX].rank > uf[rootY].rank) {
-      uf[rootY].parent = rootX;
-    } else {
-      uf[rootY].parent = rootX;
-      uf[rootX].rank++;
-    }
-    return true;
-  };
-
-  // Process edges in order, cutting at appropriate threshold
-  // Simplified: cut the MST where edge weight exceeds median mutual reachability
-  double medianWeight = edges.empty() ? 0.0 : edges[edges.size() / 2].weight;
-
-  for (const auto& edge : edges) {
-    // Only connect points if mutual reachability is not too large
-    if (edge.weight <= medianWeight * 1.5) {
-      unite(edge.p1, edge.p2);
-    }
-  }
-
-  // Extract clusters and filter by minimum cluster size
-  std::vector<int> clusterSizeMap(numPoints, 0);
-  for (int i = 0; i < numPoints; ++i) {
-    int root = find(i);
-    clusterSizeMap[root]++;
-  }
-
-  // Assign cluster labels only to clusters >= minClusterSize
-  std::vector<int> clusterLabels(numPoints, -1);
-  int clusterId = 0;
-  for (int i = 0; i < numPoints; ++i) {
-    if (clusterSizeMap[i] >= minClusterSize && clusterLabels[find(i)] == -1) {
-      clusterLabels[find(i)] = clusterId++;
-    }
-  }
-
-  // Map back to voxel grid and count final clusters
-  std::vector<int> finalClusterSizes(clusterId, 0);
-  for (int i = 0; i < numPoints; ++i) {
-    int root = find(i);
-    int label = clusterLabels[root];
-
-    if (label >= 0) {
-      finalClusterSizes[label]++;
-      std::size_t occIdx = idx3(points[i].i, points[i].j, points[i].k, ny, nz);
-      visited[occIdx] = 1;
-      result.visitedVoxels++;
-    }
-  }
-
-  // Populate result
-  result.nclusters = clusterId;
-  for (int size : finalClusterSizes) {
-    if (size > 0) {
-      result.clusterSizes.push_back(size);
-      result.maxCluster = std::max(result.maxCluster, size);
-    }
-  }
-
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
+}
+
+}  // namespace
+
+ClusterResult hdbscan(int nx, int ny, int nz, int minClusterSize, int minSamples,
+                      const std::vector<uint8_t>& occupancy, std::vector<uint8_t>& visited,
+                      bool periodic) {
+  return periodic ? hdbscanImpl<true>(nx, ny, nz, minClusterSize, minSamples, occupancy, visited)
+                  : hdbscanImpl<false>(nx, ny, nz, minClusterSize, minSamples, occupancy, visited);
 }
 
 // CC3D (Connected Components 3D) - Fair basic implementation
