@@ -20,7 +20,7 @@ enum class ClusterAlgorithm {
   // Dual-track pairs. Each <X> is the textbook-fair variant held to the same
   // optimization level as BLS; each <X>Optimized is the method as it is
   // actually published and deployed. Both tracks are reported.
-  CC3DOptimized, // CC3D, SAUF decision-tree two-pass scan over occupied voxels
+  CC3DOptimized, // CC3D as SAUF (Wu, Otoo, Shoshani 2005; Wu, Otoo, Suzuki 2009)
   RLECCL,        // Run-Length Encoding CCL (textbook: per-voxel union-find)
   RLECCLOptimized,  // RLE-CCL with runs, not voxels, as the union-find domain
   VCCS,          // Voxel Cloud Connected Segmentation (textbook: uniform seeds)
@@ -187,9 +187,10 @@ ClusterResult cc3d(
     std::vector<uint8_t>& visited,
     std::vector<int>* labels = nullptr);
 
-// CC3D Optimized - the method as actually deployed: a SAUF-style decision-tree
-// two-pass raster scan, with every auxiliary array sized to the number of
-// OCCUPIED voxels rather than to the grid volume.
+// CC3D Optimized - SAUF (Scan plus Array-based Union-Find) as published: Wu, Otoo &
+// Shoshani, SPIE 5747 (2005); Wu, Otoo & Suzuki, Pattern Anal. Appl. 12:117-135 (2009).
+// Scanning phase (S0, eq. 8) with the papers' array union-find, flattenL analysis phase,
+// labeling pass over the whole label image. See the definition.
 ClusterResult cc3dOptimized(
     int nx, int ny, int nz,
     int connectivity,

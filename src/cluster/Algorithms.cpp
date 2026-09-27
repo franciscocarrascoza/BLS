@@ -1187,32 +1187,29 @@ ClusterResult cc3d(
   return result;
 }
 
-// ── CC3D, optimized track ────────────────────────────────────────────────────
+// ── CC3D, optimized track: SAUF ──────────────────────────────────────────────
 //
-// The method as it is actually deployed, rather than the textbook form the
-// fair track holds to. Two changes, both of which matter here:
+// Scan plus Array-based Union-Find (SAUF) as PUBLISHED: K. Wu, E. Otoo, A. Shoshani,
+// "Optimizing connected component labeling algorithms", SPIE 5747 (2005), App. A, and
+// K. Wu, E. Otoo, K. Suzuki, "Optimizing two-pass connected-component labeling
+// algorithms", Pattern Anal. Appl. 12(2):117-135, doi:10.1007/s10044-008-0109-y, §3.3.
+// Audit 27.09.26: this replaces a variant with a rolling two-plane label buffer and an
+// occupied-voxel-only labeling pass, neither of which is in the sources.
 //
-// 1. SAUF (Scan plus Array-based Union-Find, Wu/Otoo/Suzuki 2005): a two-pass
-//    raster scan in which each voxel consults only its ALREADY-SCANNED
-//    neighbours -- three of the six in 6-connectivity -- and takes an existing
-//    provisional label instead of creating and then merging one. The fair
-//    track instead probes all six neighbours of every occupied voxel and
-//    unions in both directions, doing every merge twice.
-//
-// 2. Every auxiliary array is sized to the number of OCCUPIED voxels, not to
-//    the grid volume. This is the change that dominates on E1-like data.
-//    Task 11 measured the fair cc3d at 81 ms on a completely EMPTY 23.72M-voxel
-//    grid -- no occupied voxels, so no clustering work whatsoever -- because it
-//    allocates and initialises `parent` and `clusterSizeMap` at grid size. The
-//    previous "optimized" variant added a third grid-sized array (`rank`) and
-//    was consequently 21-24% SLOWER than the fair one at -O3, which is what
-//    manuscript Table 2 reports. Union-find asymptotics were never the problem.
-//
-// No array here is sized to the grid volume. The backward stencil reaches at
-// most one plane back in i, so the scan carries a rolling TWO-PLANE buffer of
-// provisional labels (2*ny*nz ints, 660 KB at E1 size against 95 MB for a full
-// grid) and records each occupied voxel's provisional label into a compact list
-// as it goes, so the resolve pass never needs to address by coordinate again.
+//   scanning phase  raster order over every voxel; the scan mask is the voxel's already
+//                   scanned neighbours (3 for 6-connectivity, 13 for 26). Eq. (8): no
+//                   labelled neighbour -> new label l (P[l] <- l); otherwise
+//                   L[e] <- min_i findRoot(P, L[i]), then setRoot(P, L[i], L[e]) for all i.
+//                   This is the scan S0; the decision tree (S1) of the papers is for 2-D
+//                   8-connectivity and has no 3-D form in them.
+//   union-find      the papers' array: findRoot follows P[i] < i to the root; setRoot
+//                   points every node of a path at the root; union keeps the smaller root
+//                   and applies setRoot to both nodes (so P[i] <= i always).
+//   analysis phase  flattenL: one pass over P assigning consecutive final labels.
+//   labeling phase  a second pass over the whole label image, L[e] <- P[L[e]].
+// The provisional label image L is grid-sized, as in the papers. Label 0 is background.
+// Under PBC xyz, the neighbour pairs that wrap across a face are united (the papers'
+// union) after the scan and before the analysis phase -- an addition for periodic grids.
 namespace {
 
 template <bool Periodic>
@@ -1230,39 +1227,35 @@ ClusterResult cc3dOptimizedImpl(
   std::fill(visited.begin(), visited.end(), 0);
   initLabels(labels, totalSize);
 
-  // Rolling provisional-label planes: `prevPlane` is i-1, `currPlane` is i.
-  // 0 means "no label". This is the whole of the coordinate-addressed state.
-  const std::size_t planeYZ = static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz);
-  std::vector<int> prevPlane(planeYZ, 0);
-  std::vector<int> currPlane(planeYZ, 0);
+  std::vector<unsigned> L(totalSize, 0u);  // provisional label image
+  std::vector<unsigned> P;                 // equivalence array; P[0] = background
+  P.reserve(1024);
+  P.push_back(0u);
 
-  // Union-find over PROVISIONAL LABELS, not voxels, so its size tracks
-  // occupancy rather than volume. Index 0 is reserved as "no label".
-  std::vector<int> parent;
-  parent.reserve(1024);
-  parent.push_back(0);
-
-  auto find = [&parent](int x) {
-    while (parent[x] != x) {
-      parent[x] = parent[parent[x]];  // path halving
-      x = parent[x];
+  auto findRoot = [&P](unsigned i) {
+    while (P[i] < i) i = P[i];
+    return i;
+  };
+  auto setRoot = [&P](unsigned i, unsigned root) {
+    while (P[i] < i) {
+      const unsigned j = P[i];
+      P[i] = root;
+      i = j;
     }
-    return x;
+    P[i] = root;
   };
-  auto unite = [&](int a, int b) {
-    a = find(a); b = find(b);
-    if (a == b) return;
-    if (a < b) parent[b] = a; else parent[a] = b;  // keep the smaller root
+  auto unite = [&](unsigned i, unsigned j) {
+    unsigned root = findRoot(i);
+    if (i != j) {
+      const unsigned rootj = findRoot(j);
+      if (root > rootj) root = rootj;
+      setRoot(j, root);
+    }
+    setRoot(i, root);
+    return root;
   };
 
-  // Occupied voxels and their provisional labels, in raster order. Sized to
-  // occupancy; this is what the resolve pass walks instead of the grid.
-  std::vector<int> occIdx, occLab;
-
-  // Backward neighbour offsets: those already visited under an (i,j,k) raster
-  // order. Three for 6-connectivity, thirteen for 26 -- exactly half of each
-  // stencil, which is the whole point of the scan order. None reaches further
-  // back than i-1, which is what makes the two-plane buffer sufficient.
+  // Scan mask: the neighbours already visited in (i,j,k) raster order.
   constexpr int back6[3][3] = {{-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
   constexpr int back26[13][3] = {
       {-1, 0, 0}, {0, -1, 0}, {0, 0, -1},
@@ -1270,108 +1263,87 @@ ClusterResult cc3dOptimizedImpl(
       {0, -1, -1}, {0, -1, 1},
       {-1, -1, -1}, {-1, -1, 1}, {-1, 1, -1}, {-1, 1, 1}};
   const int (*back)[3] = (connectivity == 26) ? back26 : back6;
-  const int numBack   = (connectivity == 26) ? 13 : 3;
+  const int numBack = (connectivity == 26) ? 13 : 3;
 
-  // Pass 1: assign provisional labels, recording equivalences.
+  // --- scanning phase (eq. 8) --------------------------------------------------------
+  unsigned nbrLabel[13];
   for (int i = 0; i < nx; ++i) {
-    std::fill(currPlane.begin(), currPlane.end(), 0);
     for (int j = 0; j < ny; ++j) {
       for (int k = 0; k < nz; ++k) {
-        const std::size_t idx = idx3(i, j, k, ny, nz);
-        if (occupancy[idx] != 1) continue;
-
-        int lab = 0;
+        const std::size_t e = idx3(i, j, k, ny, nz);
+        if (occupancy[e] != 1) continue;
+        int n = 0;
         for (int d = 0; d < numBack; ++d) {
-          const int ni = i + back[d][0];
-          const int nj = j + back[d][1];
-          const int nk = k + back[d][2];
+          const int ni = i + back[d][0], nj = j + back[d][1], nk = k + back[d][2];
           if (ni < 0 || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
-          const std::size_t off = static_cast<std::size_t>(nj) * static_cast<std::size_t>(nz) +
-                                  static_cast<std::size_t>(nk);
-          const int nl = (ni == i) ? currPlane[off] : prevPlane[off];
-          if (nl == 0) continue;
-          if (lab == 0) lab = nl;
-          else          unite(lab, nl);
+          const unsigned l = L[idx3(ni, nj, nk, ny, nz)];
+          if (l != 0u) nbrLabel[n++] = l;
         }
-        if (lab == 0) {                       // no labelled backward neighbour
-          lab = static_cast<int>(parent.size());
-          parent.push_back(lab);              // new provisional label
+        if (n == 0) {
+          const unsigned l = static_cast<unsigned>(P.size());
+          P.push_back(l);
+          L[e] = l;
+          continue;
         }
-        currPlane[static_cast<std::size_t>(j) * static_cast<std::size_t>(nz) +
-                  static_cast<std::size_t>(k)] = lab;
-        occIdx.push_back(static_cast<int>(idx));
-        occLab.push_back(lab);
+        unsigned m = findRoot(nbrLabel[0]);
+        for (int t = 1; t < n; ++t) m = std::min(m, findRoot(nbrLabel[t]));
+        for (int t = 0; t < n; ++t) setRoot(nbrLabel[t], m);
+        L[e] = m;
       }
     }
-    std::swap(prevPlane, currPlane);
   }
 
   if constexpr (Periodic) {
-    // PBC xyz: pass 1 saw every neighbour pair inside the grid; the pairs that wrap
-    // across a face are united here, from the voxels on the faces, over the full
-    // stencil. A neighbour's provisional label is found in the raster-ordered (so
-    // ascending) occupied list.
-    auto labelAt = [&](int vidx) {
-      const auto it = std::lower_bound(occIdx.begin(), occIdx.end(), vidx);
-      return (it != occIdx.end() && *it == vidx)
-                 ? occLab[static_cast<std::size_t>(it - occIdx.begin())]
-                 : 0;
-    };
-    const int plane = ny * nz;
-    for (std::size_t n = 0; n < occIdx.size(); ++n) {
-      const int i = occIdx[n] / plane;
-      const int j = (occIdx[n] - i * plane) / nz;
-      const int k = occIdx[n] - i * plane - j * nz;
-      if (i != 0 && i != nx - 1 && j != 0 && j != ny - 1 && k != 0 && k != nz - 1) continue;
-      for (int di = -1; di <= 1; ++di) {
-        for (int dj = -1; dj <= 1; ++dj) {
-          for (int dk = -1; dk <= 1; ++dk) {
-            const int manhattan = std::abs(di) + std::abs(dj) + std::abs(dk);
-            if (manhattan == 0 || (connectivity != 26 && manhattan != 1)) continue;
-            int ni = i + di, nj = j + dj, nk = k + dk;
-            if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) continue;
-            ni = (ni + nx) % nx;
-            nj = (nj + ny) % ny;
-            nk = (nk + nz) % nz;
-            const int nidx = static_cast<int>(idx3(ni, nj, nk, ny, nz));
-            if (occupancy[static_cast<std::size_t>(nidx)] != 1) continue;
-            unite(occLab[n], labelAt(nidx));
-          }
+    // Pairs across a face: from every voxel on a face, every stencil neighbour that lies
+    // outside the grid, wrapped. In-grid pairs were all seen by the scan.
+    for (int i = 0; i < nx; ++i) {
+      for (int j = 0; j < ny; ++j) {
+        for (int k = 0; k < nz; ++k) {
+          if (i != 0 && i != nx - 1 && j != 0 && j != ny - 1 && k != 0 && k != nz - 1) continue;
+          const unsigned a = L[idx3(i, j, k, ny, nz)];
+          if (a == 0u) continue;
+          for (int di = -1; di <= 1; ++di)
+            for (int dj = -1; dj <= 1; ++dj)
+              for (int dk = -1; dk <= 1; ++dk) {
+                const int m = std::abs(di) + std::abs(dj) + std::abs(dk);
+                if (m == 0 || (connectivity != 26 && m != 1)) continue;
+                int ni = i + di, nj = j + dj, nk = k + dk;
+                if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) continue;
+                ni = (ni + nx) % nx;
+                nj = (nj + ny) % ny;
+                nk = (nk + nz) % nz;
+                const unsigned b = L[idx3(ni, nj, nk, ny, nz)];
+                if (b != 0u) unite(a, b);
+              }
         }
       }
     }
   }
 
-  // Pass 2: resolve equivalences to dense ids and tally, walking the compact
-  // occupied list. Ids are handed out in order of first appearance, which is
-  // raster order -- exactly what compactLabels() would produce.
-  std::vector<int> finalId(parent.size(), -1);
-  std::vector<int> sizes;
-  sizes.reserve(parent.size());
+  // --- analysis phase: flattenL (consecutive final labels 1..count) ------------------
+  unsigned count = 0;
+  for (std::size_t l = 1; l < P.size(); ++l) {
+    if (P[l] < l) P[l] = P[P[l]];
+    else P[l] = ++count;
+  }
 
-  for (std::size_t n = 0; n < occIdx.size(); ++n) {
-    const int root = find(occLab[n]);
-    int id = finalId[static_cast<std::size_t>(root)];
-    if (id < 0) {
-      id = static_cast<int>(sizes.size());
-      finalId[static_cast<std::size_t>(root)] = id;
-      sizes.push_back(0);
-    }
-    ++sizes[static_cast<std::size_t>(id)];
-    const std::size_t idx = static_cast<std::size_t>(occIdx[n]);
-    if (labels) (*labels)[idx] = id;
-    visited[idx] = 1;
+  // --- labeling phase: second pass over the image -------------------------------------
+  std::vector<int> sizes(count, 0);
+  for (std::size_t e = 0; e < totalSize; ++e) {
+    if (L[e] == 0u) continue;
+    const unsigned f = P[L[e]];
+    L[e] = f;
+    ++sizes[f - 1];
+    if (labels) (*labels)[e] = static_cast<int>(f - 1);
+    visited[e] = 1;
     result.visitedVoxels++;
   }
 
-  result.nclusters = static_cast<int>(sizes.size());
+  result.nclusters = static_cast<int>(count);
   for (int s : sizes) {
     result.clusterSizes.push_back(s);
     result.maxCluster = std::max(result.maxCluster, s);
   }
-
-  // Labels are already dense and assigned in order of first appearance, which
-  // is exactly what compactLabels() would produce, so it is not called here.
   std::sort(result.clusterSizes.begin(), result.clusterSizes.end(), std::greater<int>());
   result.elapsedMs = timer.elapsedMilliseconds();
   return result;
