@@ -1,4 +1,4 @@
-// Created: 2026-09-28T09:55+02:00 | by: CC audit (manager) | purpose: BLS stage changes of 28.09.26 — separable probe loop (BLS-PERF2), REFINEMENT DFS, stage timers
+// Created: 2026-09-28T09:17+02:00 | by: CC audit (manager) | purpose: BLS stage changes of 28.09.26 — separable probe loop (BLS-PERF2), REFINEMENT DFS, stage timers
 //
 // Guards claims-ledger / finding / decision IDs:
 //   SEP-ID    the probe evaluation (separable loop for diagonal bases, merged runs) returns the
