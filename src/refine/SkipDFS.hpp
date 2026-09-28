@@ -40,8 +40,12 @@ class SkipDFS {
   std::size_t refinedVoxels() const { return refinedVoxels_; }
 
  private:
+  // Stack entries carry the voxel's coordinates, known when it is pushed, so a pop needs no
+  // division to recover them (audit 28.09.26, BLS-PERF2).
+  struct Cell {
+    int x, y, z;
+  };
   std::size_t index(int x, int y, int z) const;
-  void push(int idx);
   template <bool Periodic>
   int walk(int x, int y, int z, std::vector<int>* labels, int labelValue);
 
@@ -49,7 +53,7 @@ class SkipDFS {
   const std::vector<uint8_t>& occ_;
   std::vector<uint8_t>& visited_;
   std::vector<std::array<int, 3>> directions_;
-  std::vector<int> stack_;
+  std::vector<Cell> stack_;
   std::size_t refinedVoxels_{0};
 };
 

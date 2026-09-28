@@ -42,6 +42,16 @@ std::vector<std::array<int, 3>> buildDirections(int connectivity) {
   return dirs;
 }
 
+// Periodic index wrap, identical to ((a % n) + n) % n for every int a, without the two divisions
+// when a is already inside [0, n) -- the common case. The same helper as the comparison methods'
+// (cluster/Algorithms.cpp, finding PBC-PERF), which BLS's own refinement did not get then
+// (audit 28.09.26, BLS-PERF2).
+inline int wrapIndex(int a, int n) {
+  if (static_cast<unsigned>(a) < static_cast<unsigned>(n)) return a;
+  const int r = a % n;
+  return r < 0 ? r + n : r;
+}
+
 }  // namespace
 
 SkipDFS::SkipDFS(const SkipDFSConfig& cfg, const std::vector<uint8_t>& occupancy,
@@ -73,40 +83,35 @@ int SkipDFS::walk(int x, int y, int z, std::vector<int>* labels, int labelValue)
   refinedVoxels_ = 0;
 
   stack_.clear();
-  stack_.push_back(static_cast<int>(start));
+  stack_.push_back({x, y, z});
   visited_[start] = 1;
 
   while (!stack_.empty()) {
-    int idx = stack_.back();
+    const Cell c = stack_.back();
     stack_.pop_back();
-    if (labels) (*labels)[static_cast<std::size_t>(idx)] = labelValue;
+    if (labels) (*labels)[index(c.x, c.y, c.z)] = labelValue;
     ++clusterSize;
     ++refinedVoxels_;
 
-    int plane = cfg_.ny * cfg_.nz;
-    int cx = idx / plane;
-    int rem = idx - cx * plane;
-    int cy = rem / cfg_.nz;
-    int cz = rem - cy * cfg_.nz;
-
     for (const auto& dir : directions_) {
       for (int step = 1; step <= maxSkip; ++step) {
-        int nx = cx + dir[0] * step;
-        int ny = cy + dir[1] * step;
-        int nz = cz + dir[2] * step;
+        int nx = c.x + dir[0] * step;
+        int ny = c.y + dir[1] * step;
+        int nz = c.z + dir[2] * step;
         if constexpr (Periodic) {
-          // |dir * step| can exceed a small grid dimension, so wrap with a true modulo.
-          nx = ((nx % cfg_.nx) + cfg_.nx) % cfg_.nx;
-          ny = ((ny % cfg_.ny) + cfg_.ny) % cfg_.ny;
-          nz = ((nz % cfg_.nz) + cfg_.nz) % cfg_.nz;
+          // |dir * step| can exceed a small grid dimension, so the wrap is a true modulo
+          // outside [0, n).
+          nx = wrapIndex(nx, cfg_.nx);
+          ny = wrapIndex(ny, cfg_.ny);
+          nz = wrapIndex(nz, cfg_.nz);
         } else {
           if (nx < 0 || ny < 0 || nz < 0 || nx >= cfg_.nx || ny >= cfg_.ny || nz >= cfg_.nz) break;
         }
-        std::size_t nidx = index(nx, ny, nz);
+        const std::size_t nidx = index(nx, ny, nz);
         if (!occ_[nidx]) break;
         if (!visited_[nidx]) {
           visited_[nidx] = 1;
-          stack_.push_back(static_cast<int>(nidx));
+          stack_.push_back({nx, ny, nz});
         }
       }
     }
