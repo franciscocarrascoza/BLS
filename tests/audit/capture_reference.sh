@@ -10,7 +10,7 @@ BIN="${1:?usage: $0 BIN OUTDIR}"
 OUT="${2:?usage: $0 BIN OUTDIR}"
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"   # outer tree
 SYS="$ROOT/systems"
-W="$ROOT/results/E7_optimal/decks/opt_optimal.in"   # working deck (4.0 A, ALPHA 2.45, cubic F)
+W="$ROOT/results/complementary/300826-310826_pre_audit_campaign_E0-E7/E7_optimal/decks/opt_optimal.in"   # pre-audit working deck (4.0 A, ALPHA 2.45, cubic F); moved there 28.09.26
 mkdir -p "$OUT"
 : > "$OUT/cases.txt"
 fail=0
