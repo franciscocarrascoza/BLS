@@ -221,6 +221,15 @@ bool Parser::parseFile(const std::string& path, BLSConfig& config, std::string& 
         // E0-E5 decks. It maps to the refinement stride and to nothing else --
         // not to --algo-skip, which belongs to cluster::skipDFS.
         config.refinementStride = std::stoi(rest);
+      } else if (upperKeyword == "REFINEMENT") {
+        const std::string v = toUpper(trim(rest));
+        if (v == "SKIP_DFS") {
+          config.refinement = RefinementMode::SkipDFS;
+        } else if (v == "DFS") {
+          config.refinement = RefinementMode::DFS;
+        } else {
+          throw std::runtime_error("REFINEMENT expects 'skip_dfs' or 'dfs'");
+        }
       } else if (upperKeyword == "ALPHA") {
         config.alpha = std::stod(rest);
       } else if (upperKeyword == "DNN") {

@@ -34,6 +34,76 @@ inline long long roundHalfAway(double x) {
   return f >= 0.5 ? t + 1 : (f <= -0.5 ? t - 1 : t);
 }
 
+bool seedLess(const Enumerator::Seed& a, const Enumerator::Seed& b) {
+  if (a.x != b.x) return a.x < b.x;
+  if (a.y != b.y) return a.y < b.y;
+  return a.z < b.z;
+}
+
+bool seedEqual(const Enumerator::Seed& a, const Enumerator::Seed& b) {
+  return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+// Every off-diagonal entry exactly zero: every cubic basis, and every periodic basis
+// (commensurateCubicBasis). Such a basis is separable (see build()).
+bool isDiagonal(const Mat3& b) {
+  const Vec3 c0 = b.column(0), c1 = b.column(1), c2 = b.column(2);
+  return c0.y == 0.0 && c0.z == 0.0 && c1.x == 0.0 && c1.z == 0.0 && c2.x == 0.0 && c2.y == 0.0;
+}
+
+// The seed list in lexicographic (x,y,z) order, de-duplicated. `runStart` holds the start of
+// each offset's run. When every run is already in order (`runsSorted`, the separable path) the
+// runs are merged, O(n log k) for k offsets; otherwise the list is sorted, O(n log n). Either
+// way the result is the same sequence: seeds with equal keys are equal values, so a sorted
+// arrangement of a multiset of seeds is unique.
+void finishSeeds(std::vector<Enumerator::Seed>& seeds, std::vector<std::size_t> runStart,
+                 bool runsSorted) {
+  if (runsSorted) {
+    runStart.push_back(seeds.size());
+    for (std::size_t r = 1; r + 1 < runStart.size(); ++r) {
+      std::inplace_merge(seeds.begin(), seeds.begin() + static_cast<std::ptrdiff_t>(runStart[r]),
+                         seeds.begin() + static_cast<std::ptrdiff_t>(runStart[r + 1]), seedLess);
+    }
+  } else {
+    std::sort(seeds.begin(), seeds.end(), seedLess);
+  }
+  seeds.erase(std::unique(seeds.begin(), seeds.end(), seedEqual), seeds.end());
+}
+
+// The separable probe loop: the sites of one offset are the Cartesian product X x Y x Z of
+// three per-axis voxel lists (see build()), one entry per lattice index. probes counts every
+// site, entries repeated or not. A voxel repeats in a list only when the lattice is finer than
+// the grid along that axis (a < 1 voxel), and then several sites round onto one voxel: it is
+// read once for all of them, since the seed list is a set (the de-duplication below would drop
+// the copies anyway). With each list sorted and repeat-free, the product comes out in
+// lexicographic order. The inner loop is one table read and one occupancy read per voxel.
+void evaluateProduct(std::vector<int>& X, std::vector<int>& Y, std::vector<int>& Z, int ny, int nz,
+                     const std::vector<uint8_t>* occupancy, long long& probes,
+                     std::vector<Enumerator::Seed>& out) {
+  probes += static_cast<long long>(X.size()) * static_cast<long long>(Y.size()) *
+            static_cast<long long>(Z.size());
+  for (std::vector<int>* t : {&X, &Y, &Z}) {
+    std::sort(t->begin(), t->end());
+    t->erase(std::unique(t->begin(), t->end()), t->end());
+  }
+  const int* zs = Z.data();
+  const std::size_t zn = Z.size();
+  for (const int vx : X) {
+    for (const int vy : Y) {
+      if (!occupancy) {
+        for (std::size_t k = 0; k < zn; ++k) out.push_back(Enumerator::Seed{vx, vy, zs[k]});
+        continue;
+      }
+      const uint8_t* occRow =
+          occupancy->data() + (static_cast<std::size_t>(vx) * static_cast<std::size_t>(ny) +
+                               static_cast<std::size_t>(vy)) * static_cast<std::size_t>(nz);
+      for (std::size_t k = 0; k < zn; ++k) {
+        if (occRow[zs[k]]) out.push_back(Enumerator::Seed{vx, vy, zs[k]});
+      }
+    }
+  }
+}
+
 }  // namespace
 
 // Occupancy-driven enumeration (occupiedSweep). Same seed set as the probe
@@ -136,9 +206,14 @@ void Enumerator::buildFromOccupancy(const Mat3& basis, const std::vector<Vec3>& 
 }
 
 void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
-                       const std::vector<uint8_t>* occupancy, const Vec3& origin) {
+                       const std::vector<uint8_t>* occupancy, const Vec3& origin,
+                       bool allowSeparable) {
   Mat3 invBasis = inverse(basis);
   probes_ = 0;
+  // Separable basis (audit 28.09.26, finding BLS-PERF2): see the branch in the offset loop.
+  const bool separable = allowSeparable && isDiagonal(basis);
+  std::vector<std::size_t> runStart;
+  std::vector<int> tabX, tabY, tabZ;
 
   // A site s is kept iff llround(s_k) is in [0, n_k), i.e. iff s lies in the
   // half-open box [-0.5, n_k - 0.5). Bound the lattice indices with the corners
@@ -161,9 +236,16 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
   const double dims[3] = {static_cast<double>(nx), static_cast<double>(ny),
                           static_cast<double>(nz)};
   const Vec3 c3 = basis.column(2);
+  const Vec3 c0s = basis.column(0), c1s = basis.column(1);
+  // Rows along z whose z coordinate does not depend on the row (every cubic and hexagonal
+  // basis): c3 = (0, 0, c) and c0.z = c1.z = 0. The z list of one offset is then shared by all
+  // its rows (the argument of the separable branch below, applied to z alone).
+  const bool zShared = allowSeparable && c3.x == 0.0 && c3.y == 0.0 && c0s.z == 0.0 && c1s.z == 0.0;
+  long long zCount = 0;  // |Z| with repeats (sites per row), before Z is made repeat-free
   std::vector<Seed> provisional;
 
   for (const auto& offset : offsets) {
+    runStart.push_back(provisional.size());
     Vec3 offsetReal = basis * offset + origin;
     Bounds bnd;
     for (const auto& corner : corners) {
@@ -182,6 +264,63 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
     int iyMax = static_cast<int>(std::ceil(bnd.maxY)) + 1;
     int izMin = static_cast<int>(std::floor(bnd.minZ)) - 1;
     int izMax = static_cast<int>(std::ceil(bnd.maxZ)) + 1;
+
+    if (zShared) {
+      // The z list of this offset, by the row loop's expressions with the row at the box corner;
+      // its range [lo, hi] depends only on P.z, the same for every row (see the separable branch).
+      const double a0 = static_cast<double>(ixMin) + offset.x;
+      const double b0 = static_cast<double>(iyMin) + offset.y;
+      const Vec3 P = basis * Vec3{a0, b0, offset.z} + origin;
+      double t0 = (-0.5 - P.z) / c3.z, t1 = (dims[2] - 0.5 - P.z) / c3.z;
+      if (t0 > t1) std::swap(t0, t1);
+      const double lo = std::max(static_cast<double>(izMin), std::floor(t0) - 1.0);
+      const double hi = std::min(static_cast<double>(izMax), std::ceil(t1) + 1.0);
+      const Vec3 pxy0 = c0s * a0 + c1s * b0;
+      tabZ.clear();
+      for (int iz = static_cast<int>(lo); lo <= hi && iz <= static_cast<int>(hi); ++iz) {
+        const double c = static_cast<double>(iz) + offset.z;
+        const long long v = roundHalfAway((pxy0.z + c3.z * c) + origin.z);
+        if (v >= 0 && v < nz) tabZ.push_back(static_cast<int>(v));
+      }
+      zCount = static_cast<long long>(tabZ.size());
+    }
+
+    if (separable) {
+      // Diagonal basis: the general loop below evaluates site = (c0*a + c1*b + c3*c) + origin
+      // with a = ix + offset.x, b = iy + offset.y, c = iz + offset.z, and here every
+      // off-diagonal product is +-0. Adding a signed zero returns a nonzero double unchanged
+      // and a zero as a zero, which rounds to voxel 0 whatever its sign; so the rounded x
+      // depends on ix alone, y on iy alone and z on iz alone, bit for bit. Each coordinate is
+      // therefore rounded once per index along its own axis -- by the general loop's own
+      // expressions, with the other indices at the box corner -- instead of once per site,
+      // and the sites of this offset are the Cartesian product of the three in-range lists.
+      // Rows the general loop skips as rowOutside are rows whose x or y rounds outside the
+      // grid, which the lists already exclude; its z range [lo, hi] depends only on P.z,
+      // which is the same for every row here. Same voxels, same multiplicities, same probes().
+      const double a0 = static_cast<double>(ixMin) + offset.x;
+      const double b0 = static_cast<double>(iyMin) + offset.y;
+      tabX.clear();
+      tabY.clear();
+      for (int ix = ixMin; ix <= ixMax; ++ix) {
+        const Vec3 pxy = c0s * (static_cast<double>(ix) + offset.x) + c1s * b0;
+        const long long v = roundHalfAway(pxy.x + origin.x);
+        if (v >= 0 && v < nx) tabX.push_back(static_cast<int>(v));
+      }
+      for (int iy = iyMin; iy <= iyMax; ++iy) {
+        const Vec3 pxy = c0s * a0 + c1s * (static_cast<double>(iy) + offset.y);
+        const long long v = roundHalfAway(pxy.y + origin.y);
+        if (v >= 0 && v < ny) tabY.push_back(static_cast<int>(v));
+      }
+      evaluateProduct(tabX, tabY, tabZ, ny, nz, occupancy, probes_, provisional);  // Z: above
+      continue;
+    }
+    if (zShared) {
+      // Shared z list, read repeat-free (repeats round onto one voxel; probes_ still counts
+      // every site through zCount). Rows are not a product here (hexagonal: x depends on ix and
+      // iy), so the run is not in order and finishSeeds sorts.
+      std::sort(tabZ.begin(), tabZ.end());
+      tabZ.erase(std::unique(tabZ.begin(), tabZ.end()), tabZ.end());
+    }
 
     for (int ix = ixMin; ix <= ixMax; ++ix) {
       for (int iy = iyMin; iy <= iyMax; ++iy) {
@@ -226,6 +365,14 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
               (static_cast<std::size_t>(vx) * static_cast<std::size_t>(ny) +
                static_cast<std::size_t>(vy)) * static_cast<std::size_t>(nz);
           const uint8_t* occRow = occupancy ? occupancy->data() + rowBase : nullptr;
+          if (zShared) {
+            probes_ += zCount;
+            for (const int vz : tabZ) {
+              if (occRow && !occRow[vz]) continue;
+              provisional.push_back(Seed{vx, vy, vz});
+            }
+            continue;
+          }
           long long rowProbes = 0;  // local: push_back may alias a member counter
           for (int iz = static_cast<int>(lo); iz <= static_cast<int>(hi); ++iz) {
             const double c = static_cast<double>(iz) + offset.z;
@@ -262,24 +409,13 @@ void Enumerator::build(const Mat3& basis, const std::vector<Vec3>& offsets, int 
     }
   }
 
-  std::sort(provisional.begin(), provisional.end(),
-            [](const Seed& a, const Seed& b) {
-              if (a.x != b.x) return a.x < b.x;
-              if (a.y != b.y) return a.y < b.y;
-              return a.z < b.z;
-            });
-  provisional.erase(std::unique(provisional.begin(), provisional.end(),
-                                [](const Seed& a, const Seed& b) {
-                                  return a.x == b.x && a.y == b.y && a.z == b.z;
-                                }),
-                    provisional.end());
-
+  finishSeeds(provisional, runStart, separable);
   seeds_ = std::move(provisional);
 }
 
 void Enumerator::buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
                                int ny, int nz, const std::vector<uint8_t>& occupancy,
-                               const Vec3& origin) {
+                               const Vec3& origin, bool allowSeparable) {
   const int dims[3] = {nx, ny, nz};
   int cells[3];
   for (int k = 0; k < 3; ++k) {
@@ -305,8 +441,35 @@ void Enumerator::buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offse
     long long r = v % n;
     return static_cast<int>(r < 0 ? r + n : r);
   };
+  std::vector<std::size_t> runStart;
+  std::vector<int> tabX, tabY, tabZ;
   for (const auto& offset : offsets) {
+    runStart.push_back(provisional.size());
     const Vec3 c0 = basis.column(0), c1 = basis.column(1), c2 = basis.column(2);
+    if (allowSeparable) {
+      // The basis is diagonal (checked above), so the sites are separable exactly as in build():
+      // each wrapped coordinate is computed once per index along its own axis, by the row loop's
+      // expressions below, and the sites are the product of the three lists (audit BLS-PERF2).
+      const double a0 = offset.x, b0 = offset.y;  // ix = iy = 0
+      tabX.clear();
+      tabY.clear();
+      tabZ.clear();
+      for (int ix = 0; ix < cells[0]; ++ix) {
+        const Vec3 pxy = c0 * (static_cast<double>(ix) + offset.x) + c1 * b0;
+        tabX.push_back(wrap(roundHalfAway(pxy.x + origin.x), nx));
+      }
+      for (int iy = 0; iy < cells[1]; ++iy) {
+        const Vec3 pxy = c0 * a0 + c1 * (static_cast<double>(iy) + offset.y);
+        tabY.push_back(wrap(roundHalfAway(pxy.y + origin.y), ny));
+      }
+      const Vec3 pxy0 = c0 * a0 + c1 * b0;
+      for (int iz = 0; iz < cells[2]; ++iz) {
+        tabZ.push_back(
+            wrap(roundHalfAway((pxy0.z + c2.z * (static_cast<double>(iz) + offset.z)) + origin.z), nz));
+      }
+      evaluateProduct(tabX, tabY, tabZ, ny, nz, &occupancy, probes_, provisional);
+      continue;
+    }
     for (int ix = 0; ix < cells[0]; ++ix) {
       for (int iy = 0; iy < cells[1]; ++iy) {
         // Hoisted as in build(): bit-identical to basis * (idx + offset) + origin.
@@ -330,17 +493,7 @@ void Enumerator::buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offse
     }
   }
 
-  std::sort(provisional.begin(), provisional.end(),
-            [](const Seed& a, const Seed& b) {
-              if (a.x != b.x) return a.x < b.x;
-              if (a.y != b.y) return a.y < b.y;
-              return a.z < b.z;
-            });
-  provisional.erase(std::unique(provisional.begin(), provisional.end(),
-                                [](const Seed& a, const Seed& b) {
-                                  return a.x == b.x && a.y == b.y && a.z == b.z;
-                                }),
-                    provisional.end());
+  finishSeeds(provisional, runStart, allowSeparable);
   seeds_ = std::move(provisional);
 }
 
@@ -361,6 +514,21 @@ Enumerator::Enumerator(const Mat3& basis, const std::vector<Vec3>& offsets, int 
                        int nz, const std::vector<uint8_t>& occupancy, PeriodicTag,
                        const Vec3& origin) {
   buildPeriodic(basis, offsets, nx, ny, nz, occupancy, origin);
+}
+
+Enumerator Enumerator::rowWise(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
+                               int nz, const std::vector<uint8_t>& occupancy, const Vec3& origin) {
+  Enumerator e;
+  e.build(basis, offsets, nx, ny, nz, &occupancy, origin, /*allowSeparable=*/false);
+  return e;
+}
+
+Enumerator Enumerator::rowWisePeriodic(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
+                                       int ny, int nz, const std::vector<uint8_t>& occupancy,
+                                       const Vec3& origin) {
+  Enumerator e;
+  e.buildPeriodic(basis, offsets, nx, ny, nz, occupancy, origin, /*allowSeparable=*/false);
+  return e;
 }
 
 Enumerator Enumerator::occupiedSweep(const Mat3& basis, const std::vector<Vec3>& offsets,

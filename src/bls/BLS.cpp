@@ -15,6 +15,7 @@
 #include "lattice/Basis.hpp"
 #include "lattice/Enumerator.hpp"
 #include "refine/SkipDFS.hpp"
+#include "refine/StandardDFS.hpp"
 #include "util/Logging.hpp"
 #include "util/RSS.hpp"
 #include "util/Timer.hpp"
@@ -118,6 +119,7 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
   // (e.g. traditionalDFS, Algorithms.cpp). Relying on the harness's zeroing outside the
   // timer would give BLS alone a free grid-sized clear (audit S1-2).
   std::fill(visited.begin(), visited.end(), 0);
+  const double clearEnd = timer.elapsedMilliseconds();
 
   // Probe evaluation (§2.1.2, audit D3): the lattice sites inside the grid are evaluated
   // and the occupied ones seed the refinement. Under PBC the lattice is first made
@@ -129,13 +131,12 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
   if (!probeBasis(nx, ny, nz, periodic, basis, dnnVoxel, err)) return false;
   const Vec3 latticeOrigin{config_.latticeOrigin[0], config_.latticeOrigin[1],
                            config_.latticeOrigin[2]};  // deck LATTICE_ORIGIN, voxels
+  const double probeStart = timer.elapsedMilliseconds();
   const Enumerator enumerator =
       periodic ? Enumerator(basis, impl_->lattice.offsets, nx, ny, nz, occ,
                             Enumerator::PeriodicTag{}, latticeOrigin)
                : Enumerator(basis, impl_->lattice.offsets, nx, ny, nz, occ, latticeOrigin);
-
-  SkipDFSConfig skipCfg{nx, ny, nz, config_.connectivity, config_.refinementStride, periodic};
-  SkipDFS dfs(skipCfg, occ, visited);
+  const double probeEnd = timer.elapsedMilliseconds();
 
   int seeds = 0;
   int seedHits = 0;
@@ -150,26 +151,34 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
                    -1);
   }
 
-  enumerator.forEach([&](const Enumerator::Seed& seed) {
-    ++seeds;
-    std::size_t idx =
-        static_cast<std::size_t>(seed.x) * static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz) +
-        static_cast<std::size_t>(seed.y) * static_cast<std::size_t>(nz) +
-        static_cast<std::size_t>(seed.z);
-    if (!occ[idx] || visited[idx]) {
-      return;
-    }
-    // nclusters is the count of components already accepted, so it is the
-    // 0-based ordinal of this one: dense by construction.
-    int size = dfs.runFrom(seed.x, seed.y, seed.z, labels, nclusters);
-    if (size > 0) {
-      ++seedHits;
-      ++nclusters;
-      maxCluster = std::max(maxCluster, size);
-      clusterSizes.push_back(size);
-      refinedVoxels += dfs.refinedVoxels();
-    }
-  });
+  // Refinement (stage 2) from every seed. The seeds are occupied by construction (the
+  // Enumerator keeps only occupied voxels), and runFrom returns 0 for a voxel an earlier walk
+  // has already claimed, so no check is repeated here.
+  const SkipDFSConfig refineCfg{nx, ny, nz, config_.connectivity, config_.refinementStride,
+                                periodic};
+  auto refineFromSeeds = [&](auto& refiner) {
+    enumerator.forEach([&](const Enumerator::Seed& seed) {
+      ++seeds;
+      // nclusters is the count of components already accepted, so it is the
+      // 0-based ordinal of this one: dense by construction.
+      const int size = refiner.runFrom(seed.x, seed.y, seed.z, labels, nclusters);
+      if (size > 0) {
+        ++seedHits;
+        ++nclusters;
+        maxCluster = std::max(maxCluster, size);
+        clusterSizes.push_back(size);
+        refinedVoxels += refiner.refinedVoxels();
+      }
+    });
+  };
+  if (config_.refinement == RefinementMode::DFS) {
+    StandardDFS refiner(refineCfg, occ, visited);
+    refineFromSeeds(refiner);
+  } else {
+    SkipDFS refiner(refineCfg, occ, visited);
+    refineFromSeeds(refiner);
+  }
+  const double refineEnd = timer.elapsedMilliseconds();
 
   metrics.dnnVoxel = dnnVoxel;
   metrics.lattice = impl_->latticeName;
@@ -183,6 +192,10 @@ bool Analyzer::labelGrid(Grid& grid, FrameMetrics& metrics, std::string& err,
   std::sort(clusterSizes.begin(), clusterSizes.end(), std::greater<int>());
   metrics.clusterSizes = std::move(clusterSizes);
   metrics.elapsedMs = timer.elapsedMilliseconds();
+  metrics.clearMs = clearEnd;
+  metrics.probeMs = probeEnd - probeStart;
+  metrics.refineMs = refineEnd - probeEnd;
+  metrics.refinement = config_.refinement == RefinementMode::DFS ? "dfs" : "skip_dfs";
   metrics.nx = nx;
   metrics.ny = ny;
   metrics.nz = nz;

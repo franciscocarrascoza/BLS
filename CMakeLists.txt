@@ -97,6 +97,7 @@ set(core_sources
     src/grid/Grid.cpp
     src/grid/GridSpec.cpp
     src/refine/SkipDFS.cpp
+    src/refine/StandardDFS.cpp
     src/bls/BLS.cpp
     src/bls/Comparison.cpp
     src/cluster/Algorithms.cpp

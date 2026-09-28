@@ -125,6 +125,19 @@ struct ManualBox {
 
 enum class OccupancyMode { Any, All };
 
+// BLS's refinement (stage 2, after the probe evaluation). Deck keyword REFINEMENT.
+//   SKIP_DFS (default) -- refine::SkipDFS, advancing SKIP voxels per step along each direction;
+//                         the method as the manuscript describes it. At SKIP 1 it is a plain
+//                         DFS that marks voxels when they are pushed.
+//   DFS                -- refine::StandardDFS, the traditional_dfs baseline's own flood fill
+//                         (mark when popped), started from the seeds instead of from a raster
+//                         scan. Added by the audit (28.09.26) so that BLS - DFS isolates the
+//                         seeding: with DFS refinement the two methods differ only in how the
+//                         components are found (probe sites vs every voxel).
+// Both return the same components, sizes and labels (6-connectivity: a skip step stops at the
+// first unoccupied voxel, so it only reaches voxels joined through occupied ones).
+enum class RefinementMode { SkipDFS, DFS };
+
 enum class LatticeType { Cubic, Hexagonal, Triclinic };
 enum class CenteringType { P, F, I };
 
@@ -166,6 +179,7 @@ struct BLSConfig {
   // voxels per step; it is NOT ProgramOptions::skipDfsJumpDistance, which
   // belongs to the unrelated cluster::skipDFS comparison algorithm.
   int refinementStride{3};
+  RefinementMode refinement{RefinementMode::SkipDFS};  // deck keyword REFINEMENT
   double alpha{0.7};
   double dnn{0.0};
   bool hasExplicitDnn{false};

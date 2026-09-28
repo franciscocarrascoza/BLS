@@ -147,11 +147,22 @@ std::vector<int> buildSelection(const BLSConfig& config, const Topology* topo, i
 // -f15), so inserting anywhere but the end would silently shift what those reads
 // return. Columns 17-26 were appended by the 2026-09-26 audit: total_ms (the
 // whole-frame scope elapsed_ms had before the audit; elapsed_ms is now the labelling
-// call alone), the grid fingerprint (h_x..occ_sha256) and BLS's probe count.
+// call alone), the grid fingerprint (h_x..occ_sha256) and BLS's probe count. Columns
+// 27-30 (audit 28.09.26): BLS's elapsed_ms split by stage (clear_ms, probe_ms, refine_ms;
+// see FrameMetrics) and its refinement ("skip_dfs" or "dfs"); nan and n/a for the other
+// methods, which have no such stages.
 void writeCsvHeader(std::ostream& os) {
   os << "frame,time_ps,natoms,NX,NY,NZ,dNN_vox,lattice,centering,seeds,seed_hits,nclusters,"
         "max_cluster,refined_voxels,elapsed_ms,replicate,total_ms,h_x,h_y,h_z,origin_x,"
-        "origin_y,origin_z,pbc,occ_sha256,probes\n";
+        "origin_y,origin_z,pbc,occ_sha256,probes,clear_ms,probe_ms,refine_ms,refinement\n";
+}
+
+void writeStageMs(std::ostream& os, double ms) {
+  if (ms < 0.0) {
+    os << "nan";
+  } else {
+    os << ms;
+  }
 }
 
 void writeCsvRow(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber,
@@ -161,7 +172,13 @@ void writeCsvRow(std::ostream& os, const FrameMetrics& m, std::size_t frameNumbe
      << ',' << m.seedHits << ',' << m.nclusters << ',' << m.maxCluster << ','
      << m.refinedVoxels << ',' << m.elapsedMs << ',' << replicate << ',' << m.totalMs << ','
      << m.hx << ',' << m.hy << ',' << m.hz << ',' << m.originX << ',' << m.originY << ','
-     << m.originZ << ',' << m.pbc << ',' << m.occSha256 << ',' << m.probes << '\n';
+     << m.originZ << ',' << m.pbc << ',' << m.occSha256 << ',' << m.probes << ',';
+  writeStageMs(os, m.clearMs);
+  os << ',';
+  writeStageMs(os, m.probeMs);
+  os << ',';
+  writeStageMs(os, m.refineMs);
+  os << ',' << (m.refinement.empty() ? "n/a" : m.refinement) << '\n';
 }
 
 void writeJson(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber) {
@@ -187,6 +204,10 @@ void writeJson(std::ostream& os, const FrameMetrics& m, std::size_t frameNumber)
      << "\"pbc\":\"" << m.pbc << "\","
      << "\"occ_sha256\":\"" << m.occSha256 << "\","
      << "\"probes\":" << m.probes;
+  if (!m.refinement.empty()) {
+    os << ",\"clear_ms\":" << m.clearMs << ",\"probe_ms\":" << m.probeMs
+       << ",\"refine_ms\":" << m.refineMs << ",\"refinement\":\"" << m.refinement << "\"";
+  }
   if (!m.clusterSizes.empty()) {
     os << ",\"cluster_sizes\":[";
     for (std::size_t i = 0; i < m.clusterSizes.size(); ++i) {

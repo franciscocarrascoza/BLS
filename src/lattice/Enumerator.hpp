@@ -44,6 +44,17 @@ class Enumerator {
                                   int ny, int nz, const std::vector<uint8_t>& occupancy,
                                   const Vec3& origin = Vec3{});
 
+  // Test oracles for the separable probe loop (audit 28.09.26, BLS-PERF2): the same probe
+  // evaluation with that shortcut disabled -- the row-by-row loops that ran before it, which
+  // round every site's coordinates. Same seeds, same order and same probes() as the
+  // constructors above, by the argument in build().
+  static Enumerator rowWise(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny,
+                            int nz, const std::vector<uint8_t>& occupancy,
+                            const Vec3& origin = Vec3{});
+  static Enumerator rowWisePeriodic(const Mat3& basis, const std::vector<Vec3>& offsets, int nx,
+                                    int ny, int nz, const std::vector<uint8_t>& occupancy,
+                                    const Vec3& origin = Vec3{});
+
   struct Seed {
     int x;
     int y;
@@ -94,12 +105,17 @@ class Enumerator {
   // index whose site can land in the grid, evaluates the in-range sites (counting
   // them in probes_), keeps those on an occupied voxel (all of them when occupancy is
   // null), then sorts and de-duplicates by voxel.
+  // A diagonal basis (every cubic lattice) takes the separable path: each coordinate rounded
+  // once per index along its own axis, the sites the product of the three lists, the
+  // per-offset runs merged rather than sorted. allowSeparable = false is rowWise().
   void build(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
-             const std::vector<uint8_t>* occupancy, const Vec3& origin = Vec3{});
+             const std::vector<uint8_t>* occupancy, const Vec3& origin = Vec3{},
+             bool allowSeparable = true);
 
   // Periodic probe evaluation (PeriodicTag constructor).
   void buildPeriodic(const Mat3& basis, const std::vector<Vec3>& offsets, int nx, int ny, int nz,
-                     const std::vector<uint8_t>& occupancy, const Vec3& origin);
+                     const std::vector<uint8_t>& occupancy, const Vec3& origin,
+                     bool allowSeparable = true);
 
   // occupiedSweep(): iterate occupied voxels and ask which lattice sites round onto
   // them. Produces the same seed set in the same order as build() -- see the

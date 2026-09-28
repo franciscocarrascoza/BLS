@@ -37,6 +37,15 @@ struct FrameMetrics {
   double totalMs{0.0};
   // BLS only: lattice probe sites evaluated (m of §2.1.2). 0 for other methods.
   long long probes{0};
+  // BLS only (audit 28.09.26): elapsedMs split by stage, from one clock read at each boundary.
+  //   clearMs  -- zeroing the visited array (every method does this inside its timer);
+  //   probeMs  -- stage 1, probe evaluation: site -> voxel -> occupancy, seed list sorted and
+  //               de-duplicated (the Enumerator constructor);
+  //   refineMs -- stage 2, the refinement walks from the seeds.
+  // elapsedMs - (clearMs + probeMs + refineMs) is the basis set-up and the final size sort.
+  // Negative (unset) for the comparison methods, which have no such stages.
+  double clearMs{-1.0}, probeMs{-1.0}, refineMs{-1.0};
+  std::string refinement;  // BLS only: "skip_dfs" or "dfs" (deck REFINEMENT); empty otherwise
   // Grid fingerprint (brief §5): per-axis voxel edge, origin, periodic flags, SHA-256 of
   // the occupancy bits. Identical across methods for the same input and deck.
   double hx{0.0}, hy{0.0}, hz{0.0};
